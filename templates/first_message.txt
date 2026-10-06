@@ -1,0 +1,1 @@
+Hello, I'm [assistant_name], the automated message assistant for [company_name]. Would you like to leave a message for the team?

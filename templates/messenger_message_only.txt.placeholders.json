@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "template_name": "messenger_message_only",
+  "template_type": "voice-agent-system-prompt",
+  "placeholders": [
+    {
+      "name": "company_name",
+      "required": true,
+      "value_format": "scalar",
+      "description": "Public company name"
+    },
+    {
+      "name": "company_locale_english",
+      "required": true,
+      "value_format": "scalar",
+      "description": "English locale used by the assistant"
+    }
+  ]
+}

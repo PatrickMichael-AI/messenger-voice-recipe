@@ -1,0 +1,166 @@
+{
+  "voice": {
+    "speed": 1.0,
+    "style": 1,
+    "autoMode": false,
+    "provider": "11labs",
+    "chunkPlan": {
+      "enabled": true,
+      "formatPlan": {
+        "replacements": [
+          {
+            "type": "regex",
+            "regex": "\\b0\\b",
+            "value": "zero"
+          }
+        ],
+        "numberToDigitsCutoff": 99
+      },
+      "minCharacters": 50
+    },
+    "stability": 0.5,
+    "cachingEnabled": true,
+    "similarityBoost": 1,
+    "useSpeakerBoost": false,
+    "enableSsmlParsing": true,
+    "inputMinCharacters": 50,
+    "optimizeStreamingLatency": 4
+  },
+  "model": {
+    "model": "gpt-4.1",
+    "tools": [
+      {
+        "type": "endCall"
+      }
+    ],
+    "toolIds": [],
+    "provider": "openai",
+    "fallbackModels": [
+      "gpt-4.1-mini"
+    ],
+    "emotionRecognitionEnabled": true
+  },
+  "transcriber": {
+    "model": "nova-3",
+    "language": "en",
+    "numerals": true,
+    "provider": "deepgram",
+    "confidenceThreshold": 0.4
+  },
+  "clientMessages": [
+    "transcript"
+  ],
+  "analysisPlan": {
+    "summaryPlan": {
+      "enabled": false
+    },
+    "structuredDataPlan": {
+      "enabled": false
+    },
+    "successEvaluationPlan": {
+      "enabled": false
+    }
+  },
+  "compliancePlan": {
+    "hipaaEnabled": false
+  },
+  "artifactPlan": {
+    "recordingEnabled": false,
+    "videoRecordingEnabled": false
+  },
+  "maxDurationSeconds": 328,
+  "silenceTimeoutSeconds": 35,
+  "responseDelaySeconds": 0,
+  "llmRequestDelaySeconds": 0,
+  "firstMessageInterruptionsEnabled": false,
+  "numWordsToInterruptAssistant": 1,
+  "startSpeakingPlan": {
+    "waitSeconds": 0.4,
+    "transcriptionEndpointingPlan": {
+      "onPunctuationSeconds": 0.4,
+      "onNoPunctuationSeconds": 1.5,
+      "onNumberSeconds": 0.5
+    },
+    "smartEndpointingEnabled": false
+  },
+  "stopSpeakingPlan": {
+    "numWords": 0,
+    "voiceSeconds": 0.2,
+    "backoffSeconds": 1,
+    "acknowledgementPhrases": [
+      "i understand",
+      "i see",
+      "i got it",
+      "i hear you",
+      "im listening",
+      "im with you",
+      "right",
+      "okay",
+      "ok",
+      "sure",
+      "alright",
+      "got it",
+      "understood",
+      "yeah",
+      "yes",
+      "uh-huh",
+      "mm-hmm",
+      "gotcha",
+      "mhmm",
+      "ah",
+      "yeah okay",
+      "yeah sure"
+    ],
+    "interruptionPhrases": [
+      "stop",
+      "shut",
+      "up",
+      "enough",
+      "quiet",
+      "silence",
+      "but",
+      "dont",
+      "not",
+      "no",
+      "hold",
+      "wait",
+      "cut",
+      "pause",
+      "nope",
+      "nah",
+      "nevermind",
+      "never",
+      "bad",
+      "actually"
+    ]
+  },
+  "messagePlan": {
+    "idleMessages": [
+      "Are you still there?"
+    ],
+    "idleMessageMaxSpokenCount": 3,
+    "idleMessageResetCountOnUserSpeechEnabled": true,
+    "idleTimeoutSeconds": 8,
+    "silenceTimeoutMessage": "I'll end our call now. Thank you!"
+  },
+  "backgroundSpeechDenoisingPlan": {
+    "smartDenoisingPlan": {
+      "enabled": true
+    },
+    "fourierDenoisingPlan": {
+      "enabled": false
+    }
+  },
+  "backgroundDenoisingEnabled": true,
+  "backgroundSound": "off",
+  "backchannelingEnabled": false,
+  "firstMessageMode": "assistant-speaks-first",
+  "voicemailDetectionEnabled": false,
+  "dialKeypadFunctionEnabled": false,
+  "endCallFunctionEnabled": true,
+  "endCallMessage": "Goodbye",
+  "endCallPhrases": [
+    "Have a great day."
+  ],
+  "serverMessages": []
+}

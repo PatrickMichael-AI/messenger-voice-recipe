@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "upstreamRepository": "PatrickMichael-AI/pm-voice-agents",
+  "upstreamCommit": "b8671f1",
+  "artifacts": {
+    "templates/messenger_message_only.txt": {
+      "sha256": "df26b1c7bbdf384ac25d61877491f8d82ebe56bc354bed1c476a8a9a782f4703",
+      "upstreamPath": "agent-templates/messenger/messenger_message_only.txt"
+    },
+    "templates/messenger_message_only.txt.placeholders.json": {
+      "sha256": "e5bd2eddc839c9f295d66d148792e2a8f1408b5fa28fb829ea29e91069cd86a1",
+      "upstreamPath": "agent-templates/messenger/messenger_message_only.txt.placeholders.json"
+    },
+    "templates/first_message.txt": {
+      "sha256": "5f3559e2afefb4df492606225091e57596fb87b2b42bf1e079570f1c69cbd9a6",
+      "origin": "Recipe Mira opening proposed in README; reproducible instance substitutions"
+    }
+  }
+}

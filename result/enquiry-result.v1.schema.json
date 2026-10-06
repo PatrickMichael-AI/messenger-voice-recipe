@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:messenger:enquiry-result:1.0.0",
+  "title": "Messenger Structured Enquiry Result 1.0.0",
+  "description": "Caller-evidenced result only; provider metadata and notification state are outside this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "outcome", "completeness", "callbackNumberConfirmed", "evidence", "uncertainties"],
+  "properties": {
+    "schemaVersion": {"type": "string", "const": "1.0.0"},
+    "outcome": {"type": "string", "enum": ["enquiry", "declined", "unsupported", "no_message"]},
+    "completeness": {"type": "string", "enum": ["complete", "partial", "not_applicable"]},
+    "callerName": {"type": "string", "minLength": 1},
+    "message": {"type": "string", "minLength": 1},
+    "callbackNumber": {"type": "string", "pattern": "^\\+?[0-9]{3,20}$"},
+    "callbackNumberConfirmed": {"type": "boolean"},
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "speaker", "quote"],
+        "properties": {
+          "field": {"type": "string", "enum": ["consent", "callerName", "message", "callbackNumber", "callbackReadback", "callbackConfirmation", "outcome"]},
+          "speaker": {"type": "string", "enum": ["caller", "assistant"]},
+          "quote": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "uncertainties": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "enquiry"}}},
+      "then": {"properties": {"completeness": {"enum": ["complete", "partial"]}}},
+      "else": {
+        "properties": {
+          "completeness": {"const": "not_applicable"},
+          "callbackNumberConfirmed": {"const": false}
+        },
+        "not": {"anyOf": [{"required": ["callerName"]}, {"required": ["message"]}, {"required": ["callbackNumber"]}]}
+      }
+    },
+    {
+      "if": {"properties": {"completeness": {"const": "complete"}}},
+      "then": {
+        "required": ["callerName", "message", "callbackNumber"],
+        "properties": {"callbackNumberConfirmed": {"const": true}}
+      }
+    },
+    {
+      "if": {"properties": {"callbackNumberConfirmed": {"const": true}}},
+      "then": {"required": ["callbackNumber"]}
+    }
+  ]
+}

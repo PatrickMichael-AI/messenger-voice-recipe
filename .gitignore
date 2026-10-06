@@ -1,0 +1,48 @@
+# Generated prompts, approvals, provider IDs and private call evidence
+/.local/
+
+# Credentials and local environment configuration
+.env
+.env.*
+!.env.example
+.envrc
+/.direnv/
+/secrets/
+/credentials/
+*.pem
+*.key
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode, caches, coverage and build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+
+# Local agent, cloud and editor settings
+/.agents/
+/.codex/
+/.claude/
+/.aws/
+.idea/
+.vscode/
+
+# Logs and temporary editor/OS files
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

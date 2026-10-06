@@ -1,0 +1,34 @@
+{
+  "recipeVersion": "0.1.0",
+  "reviewStatus": "pending",
+  "slug": "messenger_recipe_demo",
+  "business": {
+    "name": "Pebble Workshop",
+    "fictional": true,
+    "assistantName": "Mira",
+    "purpose": "Take a message for the team"
+  },
+  "language": "en",
+  "localeEnglish": "English",
+  "voice": {
+    "provider": "11labs",
+    "voiceId": "fFAtoTPtP0TtMyhbR3L9",
+    "model": "eleven_flash_v2_5"
+  },
+  "sources": {
+    "systemTemplate": "templates/messenger_message_only.txt",
+    "placeholderContract": "templates/messenger_message_only.txt.placeholders.json",
+    "openingTemplate": "templates/first_message.txt",
+    "runtime": "config/runtime.json"
+  },
+  "result": {
+    "logicalName": "messenger-enquiry",
+    "version": "1.0.0",
+    "schemaRef": "result/enquiry-result.v1.schema.json"
+  },
+  "privacy": {
+    "recordingEnabled": false,
+    "localContentRetentionDays": 14,
+    "liveData": "synthetic_only"
+  }
+}
