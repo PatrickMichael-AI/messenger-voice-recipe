@@ -12,7 +12,7 @@
   "localeEnglish": "English",
   "voice": {
     "provider": "11labs",
-    "voiceId": "fFAtoTPtP0TtMyhbR3L9",
+    "voiceId": "NTqGiNK8P02i66yY2GOH",
     "model": "eleven_flash_v2_5"
   },
   "sources": {
@@ -27,7 +27,7 @@
     "schemaRef": "result/enquiry-result.v1.schema.json"
   },
   "privacy": {
-    "recordingEnabled": false,
+    "recordingEnabled": true,
     "localContentRetentionDays": 14,
     "liveData": "synthetic_only"
   }

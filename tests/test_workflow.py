@@ -9,7 +9,7 @@ import unittest
 
 from messenger_recipe.deployment import DeploymentError
 from messenger_recipe.recipe import RecipeError, record_voice_selection, stage_candidate
-from messenger_recipe.workflow import deploy, deployment_preview, promote, require_promotion
+from messenger_recipe.workflow import deploy, deployment_preview, promote, require_promotion, verify_deployment
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -41,6 +41,11 @@ class Provider:
 
     def get_output(self, identity):
         return self._get("output", identity)
+
+    def update_output(self, identity, payload):
+        self.calls.append(("patch", "output", deepcopy(payload)))
+        self.resources[identity] = {**deepcopy(payload), "id": identity, "providerDefault": "retained"}
+        return deepcopy(self.resources[identity])
 
     def create_assistant(self, payload):
         return self._create("assistant", payload)
@@ -87,8 +92,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.provider.calls, [])
         self.assertFalse((self.root / ".local" / SLUG / "assistant-accepted.json").exists())
 
-    def test_clone_promotes_its_own_review_without_historical_baseline(self):
-        self.assertFalse((self.root / ".local" / SLUG / "baseline-review.json").exists())
+    def test_clone_promotes_its_own_review(self):
         result = self.approve()
         self.assertFalse(result["liveAuthorized"])
         self.assertEqual(deployment_preview(self.root, SLUG)["promotionStatus"], "approved_current_sources")
@@ -96,6 +100,29 @@ class WorkflowTests(unittest.TestCase):
         staged = self.root / ".local" / SLUG / "prompts/backups" / f"{SLUG}_vapi_system_prompt_refactor.txt"
         self.assertEqual(canonical.read_bytes(), staged.read_bytes())
         self.assertEqual(canonical.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_mismatched_or_malformed_promotion_never_grants_approval(self):
+        self.approve()
+        path = self.root / ".local" / SLUG / "promotion-review.json"
+        original = path.read_text()
+        for change in (
+                lambda v: v.update(slug="other"),
+                lambda v: v.update(assistantName="Other"),
+                lambda v: v.update(scope="live-provisioning"),
+                lambda v: v.update(promotionSha256="wrong"),
+                lambda v: v.update(approvalSource=""),
+                None):
+            with self.subTest(change=change):
+                if change is None:
+                    path.write_text("invalid approval\n")
+                else:
+                    value = json.loads(original)
+                    change(value)
+                    path.write_text(json.dumps(value) + "\n")
+                self.assertEqual(deployment_preview(self.root, SLUG)["promotionStatus"], "pending_or_stale")
+                with self.assertRaises(RecipeError):
+                    deploy(self.root, SLUG, self.provider)
         self.assertEqual(self.provider.calls, [])
 
     def test_two_live_executions_create_once_verify_output_and_preserve_all_settings(self):
@@ -157,9 +184,32 @@ class WorkflowTests(unittest.TestCase):
             ("get", "output"), ("get", "assistant"), ("patch", "assistant"), ("get", "assistant")])
         updated = self.provider.resources["test-assistant-id"]
         self.assertEqual(updated["maxDurationSeconds"], 330)
-        self.assertEqual(updated["artifactPlan"], {"recordingEnabled": False, "videoRecordingEnabled": False,
+        self.assertEqual(updated["artifactPlan"], {"recordingEnabled": True, "videoRecordingEnabled": False,
                                                 "structuredOutputIds": ["test-output-id"]})
-        self.assertTrue(list((self.root / ".local" / SLUG / "prompts/backups").glob("*.review")))
+        self.assertTrue(list((self.root / ".local" / SLUG).glob("candidate.*.json")))
+
+    def test_recording_correction_updates_existing_assistant_and_retains_output_binding(self):
+        instance = f"instances/{SLUG}/recipe.json"
+        self.mutate(instance, lambda v: v["privacy"].update(recordingEnabled=False))
+        self.mutate("config/runtime.json", lambda v: v["artifactPlan"].update(recordingEnabled=False))
+        stage_candidate(self.root, SLUG, refresh=True)
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        self.provider.calls.clear()
+        self.mutate(instance, lambda v: v["privacy"].update(recordingEnabled=True))
+        self.mutate("config/runtime.json", lambda v: v["artifactPlan"].update(recordingEnabled=True))
+        with self.assertRaises(RecipeError):
+            deploy(self.root, SLUG, self.provider)
+        self.assertEqual(self.provider.calls, [])
+        stage_candidate(self.root, SLUG, refresh=True)
+        self.approve()
+        result = deploy(self.root, SLUG, self.provider)
+        self.assertEqual(result["assistantId"], "test-assistant-id")
+        self.assertEqual([call[:2] for call in self.provider.calls], [
+            ("get", "output"), ("get", "assistant"), ("patch", "assistant"), ("get", "assistant")])
+        self.assertEqual(self.provider.resources[result["assistantId"]]["artifactPlan"], {
+            "recordingEnabled": True, "videoRecordingEnabled": False,
+            "structuredOutputIds": ["test-output-id"]})
 
     def test_remote_output_drift_or_conflicting_local_definition_blocks_assistant_mutation(self):
         self.approve()
@@ -188,6 +238,84 @@ class WorkflowTests(unittest.TestCase):
             deploy(self.root, SLUG, self.provider)
         self.assertFalse(any(call[0] == "patch" for call in self.provider.calls))
 
+    def test_explicit_output_update_retains_ids_and_verifies_before_acceptance(self):
+        self.approve()
+        initial = deploy(self.root, SLUG, self.provider)
+        state = self.root / ".local" / SLUG
+        previous = (state / "output-accepted.json").read_bytes()
+        self.mutate("config/structured-output.json", lambda v: v["model"].update(maxTokens=1900))
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(DeploymentError, "binding conflicts"):
+            deploy(self.root, SLUG, self.provider)
+        self.assertEqual(self.provider.calls, [])
+        updated = deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual(updated["assistantId"], initial["assistantId"])
+        self.assertEqual(updated["outputId"], initial["outputId"])
+        self.assertEqual([c[:2] for c in self.provider.calls], [
+            ("get", "output"), ("patch", "output"), ("get", "output"), ("get", "assistant")])
+        archives = list(state.glob("output-accepted.*.json"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), previous)
+        self.assertEqual(json.loads((state / "output-accepted.json").read_text())["readback"]["model"]["maxTokens"], 1900)
+
+    def test_output_update_requires_existing_binding_and_stops_on_remote_drift(self):
+        self.approve()
+        with self.assertRaisesRegex(DeploymentError, "accepted existing"):
+            deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual(self.provider.calls, [])
+        deploy(self.root, SLUG, self.provider)
+        state = self.root / ".local" / SLUG
+        before = (state / "output-accepted.json").read_bytes()
+        self.mutate("config/structured-output.json", lambda v: v["model"].update(maxTokens=1900))
+        self.provider.resources["test-output-id"]["model"]["maxTokens"] = 1800
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(DeploymentError, "Remote owned settings"):
+            deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual([c[:2] for c in self.provider.calls], [("get", "output")])
+        self.assertEqual((state / "output-accepted.json").read_bytes(), before)
+
+    def test_output_update_lost_response_recovers_by_get_without_repatch_or_create(self):
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        state = self.root / ".local" / SLUG
+        before = (state / "output-accepted.json").read_bytes()
+        self.mutate("config/structured-output.json", lambda v: v["model"].update(maxTokens=1900))
+        update = self.provider.update_output
+
+        def lost_response(identity, payload):
+            update(identity, payload)
+            raise TimeoutError("Synthetic PATCH response lost after applying update")
+
+        self.provider.update_output = lost_response
+        self.provider.calls.clear()
+        with self.assertRaises(TimeoutError):
+            deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual((state / "output-accepted.json").read_bytes(), before)
+        self.provider.calls.clear()
+        result = deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual(result["outputId"], "test-output-id")
+        self.assertEqual([c[:2] for c in self.provider.calls], [("get", "output"), ("get", "assistant")])
+
+    def test_output_readback_retaining_unsupported_constraints_does_not_accept_update(self):
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        state = self.root / ".local" / SLUG
+        before = (state / "output-accepted.json").read_bytes()
+        self.mutate("config/structured-output.json", lambda v: v["model"].update(maxTokens=1900))
+        update = self.provider.update_output
+
+        def retains_old_constraints(identity, payload):
+            response = update(identity, payload)
+            self.provider.resources[identity]["schema"]["allOf"] = [{"type": "object"}]
+            return response
+
+        self.provider.update_output = retains_old_constraints
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(DeploymentError, "schema.allOf"):
+            deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual((state / "output-accepted.json").read_bytes(), before)
+        self.assertFalse(any(c[1] == "assistant" for c in self.provider.calls))
+
     def test_edited_promoted_artifacts_and_invalid_recovery_are_refused_before_provider_calls(self):
         self.approve()
         with self.assertRaisesRegex(DeploymentError, "No unresolved"):
@@ -197,6 +325,68 @@ class WorkflowTests(unittest.TestCase):
         canonical.write_text(canonical.read_text() + "Operator edited canonical\n")
         with self.assertRaisesRegex(RecipeError, "Promoted artifact differs"):
             deploy(self.root, SLUG, self.provider)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_verification_is_get_only_preserves_acceptance_and_raw_evidence(self):
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        state = self.root / ".local" / SLUG
+        before = {kind: (state / f"{kind}-accepted.json").read_bytes() for kind in ("output", "assistant")}
+        self.provider.calls.clear()
+        first = verify_deployment(self.root, SLUG, self.provider)
+        second = verify_deployment(self.root, SLUG, self.provider)
+        self.assertEqual(first["status"], "owned_settings_match")
+        self.assertEqual(first["publicationStatus"], "not_proved_by_api_get")
+        self.assertEqual(first["callBehavior"], "not_yet_proved")
+        self.assertEqual([call[:2] for call in self.provider.calls], [("get", "output"), ("get", "assistant")] * 2)
+        for kind in before:
+            self.assertEqual(before[kind], (state / f"{kind}-accepted.json").read_bytes())
+            path = self.root / first["evidencePaths"][kind]
+            self.assertEqual(json.loads(path.read_text()), self.provider.resources[first[f"{kind}Id"]])
+            self.assertNotEqual(first["evidencePaths"][kind], second["evidencePaths"][kind])
+
+    def test_verification_reports_both_resources_drift_and_identity_mismatch(self):
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        self.provider.calls.clear()
+        self.provider.resources["test-output-id"]["conditions"] = []
+        self.provider.resources["test-assistant-id"]["maxDurationSeconds"] = 42
+        self.provider.resources["test-assistant-id"]["id"] = "foreign-assistant"
+        report = verify_deployment(self.root, SLUG, self.provider)
+        self.assertEqual(report["status"], "owned_setting_drift")
+        self.assertEqual(report["differences"], {"output": ["conditions"], "assistant": ["id", "maxDurationSeconds"]})
+        self.assertTrue(all(call[0] == "get" for call in self.provider.calls))
+        self.provider.resources["test-output-id"]["id"] = "foreign-output"
+        self.assertIn("id", verify_deployment(self.root, SLUG, self.provider)["differences"]["output"])
+
+    def test_verification_refuses_unapproved_or_changed_source_before_get(self):
+        with self.assertRaises(RecipeError):
+            verify_deployment(self.root, SLUG, self.provider)
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        self.provider.calls.clear()
+        self.mutate("config/runtime.json", lambda value: value.update(maxDurationSeconds=330))
+        with self.assertRaises(RecipeError):
+            verify_deployment(self.root, SLUG, self.provider)
+        stage_candidate(self.root, SLUG, refresh=True)
+        self.approve()
+        with self.assertRaisesRegex(DeploymentError, "Accepted assistant intent differs"):
+            verify_deployment(self.root, SLUG, self.provider)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_verification_refuses_changed_output_and_pending_creation_before_get(self):
+        self.approve()
+        deploy(self.root, SLUG, self.provider)
+        self.provider.calls.clear()
+        path = self.root / "config/structured-output.json"
+        original = path.read_bytes()
+        self.mutate("config/structured-output.json", lambda value: value["model"].update(maxTokens=1999))
+        with self.assertRaisesRegex(DeploymentError, "Accepted output intent differs"):
+            verify_deployment(self.root, SLUG, self.provider)
+        path.write_bytes(original)
+        (self.root / ".local" / SLUG / "assistant-pending.json").write_text("{}")
+        with self.assertRaisesRegex(DeploymentError, "Unresolved creation"):
+            verify_deployment(self.root, SLUG, self.provider)
         self.assertEqual(self.provider.calls, [])
 
 

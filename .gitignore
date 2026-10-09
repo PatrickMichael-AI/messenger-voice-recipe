@@ -6,9 +6,9 @@
 .env.*
 !.env.example
 .envrc
-/.direnv/
-/secrets/
-/credentials/
+/.direnv
+/secrets
+/credentials
 *.pem
 *.key
 

@@ -1,8 +1,10 @@
 """Compare authored intent with independent provider GET evidence.
 
-Only two proved representation differences are normalized: omitted empty
+Two provider representation differences are normalized: omitted empty
 serverMessages (the parent config-alignment evidence, 2026-09-29), and the order
-of JSON Schema required members. Every other list retains its order; an owned
+of JSON Schema required members. JSON numbers compare by exact numeric value,
+so Vapi's speed 1 matches authored 1.0; booleans remain distinct from numbers.
+Every other list retains its order; an owned
 value disappearing, including an explicit null, is drift. Provider-added
 defaults/identity/version fields are outside authored intent.
 """
@@ -26,11 +28,19 @@ def differences(intent: dict, actual: dict) -> list[str]:
             if not isinstance(observed, dict):
                 changed.append(path or "$")
                 return
+            if schema:
+                # The entire extraction schema is owned. Extra constraints can
+                # keep a supposedly repaired schema incompatible at execution.
+                for key in sorted(set(observed) - set(expected)):
+                    changed.append(f"{path}.{key}")
             for key, value in expected.items():
                 compare(value, observed.get(key, _MISSING), f"{path}.{key}".lstrip("."),
                         schema=schema or key == "schema")
         elif schema and path.endswith(".required") and isinstance(expected, list):
             if not isinstance(observed, list) or sorted(expected) != sorted(observed):
+                changed.append(path)
+        elif type(expected) in (int, float) and type(observed) in (int, float):
+            if expected != observed:
                 changed.append(path)
         elif type(expected) is not type(observed) or expected != observed:
             changed.append(path)

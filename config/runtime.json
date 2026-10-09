@@ -62,10 +62,11 @@
     }
   },
   "compliancePlan": {
-    "hipaaEnabled": false
+    "hipaaEnabled": false,
+    "zdrEnabled": false
   },
   "artifactPlan": {
-    "recordingEnabled": false,
+    "recordingEnabled": true,
     "videoRecordingEnabled": false
   },
   "maxDurationSeconds": 328,
@@ -79,7 +80,7 @@
     "transcriptionEndpointingPlan": {
       "onPunctuationSeconds": 0.4,
       "onNoPunctuationSeconds": 1.5,
-      "onNumberSeconds": 0.5
+      "onNumberSeconds": 2.0
     },
     "smartEndpointingEnabled": false
   },

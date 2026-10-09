@@ -3,8 +3,9 @@
 The definition follows Vapi's create-output API (checked 2026-10-06):
 https://docs.vapi.ai/api-reference/structured-outputs/structured-output-controller-create
 Custom extraction uses documented transcript/structuredOutput.schema Liquid
-variables. minMessages count 0 removes the runtime default minimum. Offline
-checks neither run an extractor nor establish transcript semantics/API acceptance.
+variables. The provider schema is a plain required-field object; absent captured
+strings use an empty string. Local normalization restores omissions and enforces
+the enquiry contract. Offline checks do not establish live extraction accuracy.
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from pathlib import Path
 import re
 
 from .deployment import digest
-from .recipe import RecipeError, _json, load_instance, package_path
+from .recipe import load_instance
+from .state import RecipeError, package_path, read_json
 
 
 SCHEMA_DIGEST = "f304b725ddd73019f564a84fea7cb2c422b53073df8f658ed4a32e6e73dddd19"
@@ -24,11 +26,13 @@ DEFINITION_PATH = "config/structured-output.json"
 def render_output(root: Path, slug: str) -> dict:
     """Produce API intent without a provider ID or fictional binding.
 
-    The result schema is injected unchanged from its sole instance-owned source.
+    The result contract stays unchanged in its sole instance-owned source.
+    Its provider representation uses the common Vapi/OpenAI schema subset.
+    Cross-field conditions and non-empty checks remain in local validation.
     Changing the v1 contract requires a separately reviewed version/migration.
     """
     instance = load_instance(root, slug)
-    definition = _json(package_path(root, DEFINITION_PATH))
+    definition = read_json(package_path(root, DEFINITION_PATH))
     if set(definition) != {"name", "description", "type", "model", "conditions"}:
         raise RecipeError("Output source requires only name, description, type, model and conditions.")
     name = definition.get("name")
@@ -68,13 +72,99 @@ def render_output(root: Path, slug: str) -> dict:
     remainder = re.sub(r"{{\s*[^{}]+?\s*}}", "", text)
     if "{{" in remainder or "}}" in remainder or "{%" in remainder or "%}" in remainder:
         raise RecipeError("Extraction contains an unsupported Liquid expression.")
-    schema = _json(package_path(root, instance["result"]["schemaRef"]))
+    schema = read_json(package_path(root, instance["result"]["schemaRef"]))
     if digest(schema) != SCHEMA_DIGEST:
         raise RecipeError("Enquiry v1.0.0 schema differs from the agreed contract; review a version change.")
     result = deepcopy(definition)
     result["name"] = full_name
-    result["schema"] = schema
+    result["schema"] = _vapi_schema(schema)
     return result
+
+
+def _vapi_schema(schema: dict) -> dict:
+    """Render the fixed contract's extraction shape, not its validation schema.
+
+    OpenAI rejects conditional composition and requires every object field.
+    Vapi's documented type enum excludes null/unions. Empty captured strings
+    therefore represent absence on the wire only. Never relax the canonical
+    validator or infer consent/confirmation while normalizing the response.
+    """
+    def wire(node: dict) -> dict:
+        result = {"type": node["type"]}
+        if "enum" in node:
+            result["enum"] = deepcopy(node["enum"])
+        if "const" in node:
+            result["enum"] = [node["const"]]
+        if node["type"] == "object":
+            result["properties"] = {key: wire(value) for key, value in node["properties"].items()}
+            result["required"] = list(result["properties"])
+            result["additionalProperties"] = False
+        if node["type"] == "array":
+            result["items"] = wire(node["items"])
+        return result
+
+    result = wire(schema)
+    for field in ("callerName", "message", "callbackNumber"):
+        result["properties"][field]["description"] = "Use an empty string when absent or withdrawn; never invent a value."
+    return result
+
+
+def normalize_native_result(result: dict) -> dict:
+    """Return a validated canonical copy; leave raw provider evidence untouched.
+
+    Historical canonical results without empty placeholders remain readable.
+    Only exact empty captured strings become omissions; nulls, missing required
+    fields, unknown fields and contradictory outcomes still fail validation.
+    """
+    if not isinstance(result, dict):
+        raise RecipeError("Native result must be an object.")
+    normalized = deepcopy(result)
+    for field in ("callerName", "message", "callbackNumber"):
+        if normalized.get(field) == "":
+            del normalized[field]
+    validate_result_shape(normalized)
+    return normalized
+
+
+def read_enquiry_result(call: dict, output_id: str) -> dict:
+    """Classify one call's native result for the bound output; never raises for payload problems.
+
+    Returns status, providerOutputMetadata when present, and the canonical
+    result only when its shape is valid. The result is caller content: reports
+    must not print it. A valid shape does not prove semantic correctness.
+    """
+    artifact = call.get("artifact")
+    outputs = artifact.get("structuredOutputs") if isinstance(artifact, dict) else None
+    if artifact is not None and not isinstance(artifact, dict):
+        return {"status": "malformed_native_result"}
+    if outputs is None or outputs == {}:
+        return {"status": "missing_native_result"}
+    if not isinstance(outputs, dict):
+        return {"status": "malformed_native_result"}
+    if output_id not in outputs:
+        return {"status": "wrong_output_binding"}
+    entry = outputs[output_id]
+    if not isinstance(entry, dict):
+        return {"status": "malformed_native_result"}
+    reading = {}
+    metadata = {key: entry[key] for key in ("version", "versionId", "structuredOutputVersion", "structuredOutputVersionId")
+                if key in entry and type(entry[key]) in (str, int)}
+    if metadata:
+        reading["providerOutputMetadata"] = metadata
+    if any(key in entry and entry[key] != output_id for key in ("id", "structuredOutputId")):
+        reading["status"] = "wrong_output_binding"
+    elif entry.get("error") or entry.get("status") in ("failed", "error"):
+        reading["status"] = "failed_native_result"
+    elif "result" not in entry or entry["result"] is None:
+        reading["status"] = "missing_native_result"
+    else:
+        try:
+            reading["result"] = normalize_native_result(entry["result"])
+        except RecipeError:
+            reading["status"] = "malformed_native_result"
+        else:
+            reading["status"] = "valid_shape_semantics_unproved"
+    return reading
 
 
 def validate_result_shape(result: dict) -> None:

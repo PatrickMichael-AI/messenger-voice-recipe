@@ -1,5 +1,4 @@
 # Direct HTTP transport and its exact tested transitive dependencies.
-# The parent repository's dependencies remain unchanged.
 anyio==4.15.1
 certifi==2026.7.22
 h11==0.16.0

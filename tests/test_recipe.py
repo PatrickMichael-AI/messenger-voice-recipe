@@ -10,9 +10,10 @@ import tempfile
 import unittest
 
 from messenger_recipe.recipe import (
-    RecipeError, instance_state, load_instance, record_voice_selection,
-    record_baseline_review, render_candidate, stage_candidate,
+    RecipeError, load_instance, record_voice_selection,
+    render_candidate, stage_candidate,
 )
+from messenger_recipe.state import InstanceState
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -42,23 +43,23 @@ class RecipeTests(unittest.TestCase):
             render_candidate(self.root, SLUG)
         self.assertFalse((self.root / ".local").exists())
 
-    def test_exact_twenty_section_render_and_pending_runtime_candidate(self):
+    def test_exact_twenty_one_section_render_and_pending_runtime_candidate(self):
         self.approve()
         candidate = render_candidate(self.root, SLUG)
         prompt = candidate["systemPrompt"]
-        self.assertEqual(len(re.findall(r"^\[[^\]\n]+\]$", prompt, re.M)), 20)
+        self.assertEqual(len(re.findall(r"^\[[^\]\n]+\]$", prompt, re.M)), 21)
         self.assertEqual(hashlib.sha256(prompt.encode()).hexdigest(),
-                         "c670cb6584780299cdaa89f9fda43f3e10750418b71621a2ecb3c6aaa1790059")
+                         "1e7c694d76bb3d372abfa6c88ab6993858128168b9fcf6c24e5c45415cf29fa4")
         self.assertEqual(candidate["firstMessage"],
                          "Hello, I'm Mira, the automated message assistant for Pebble Workshop. "
                          "Would you like to leave a message for the team?")
         self.assertEqual(candidate["candidateStatus"], "provisional_unbound")
-        self.assertEqual(candidate["reviewStatus"], "pending")
         payload = candidate["assistantPayload"]
         self.assertEqual(payload["model"]["messages"], [{"role": "system", "content": prompt}])
-        self.assertEqual(payload["voice"]["voiceId"], "fFAtoTPtP0TtMyhbR3L9")
+        self.assertEqual(payload["voice"]["voiceId"], "NTqGiNK8P02i66yY2GOH")
         self.assertEqual(payload["voice"]["model"], "eleven_flash_v2_5")
-        self.assertEqual(payload["artifactPlan"], {"recordingEnabled": False, "videoRecordingEnabled": False})
+        self.assertEqual(payload["artifactPlan"], {"recordingEnabled": True, "videoRecordingEnabled": False})
+        self.assertEqual(payload["compliancePlan"], {"hipaaEnabled": False, "zdrEnabled": False})
         self.assertEqual(payload["endCallPhrases"], ["Have a great day."])
         self.assertEqual(payload["serverMessages"], [])
         self.assertNotIn("server", payload)
@@ -76,6 +77,58 @@ class RecipeTests(unittest.TestCase):
         self.assertFalse((self.root / "agent-configs").exists())
         self.assertFalse((self.root / "var").exists())
 
+    def test_recording_requires_explicit_boolean_and_matching_runtime_policy(self):
+        self.approve()
+        relative = f"instances/{SLUG}/recipe.json"
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                self.update(relative, lambda v: v["privacy"].update(recordingEnabled=enabled))
+                self.update("config/runtime.json", lambda v: v["artifactPlan"].update(recordingEnabled=enabled))
+                self.assertIs(render_candidate(self.root, SLUG)["assistantPayload"]["artifactPlan"]["recordingEnabled"], enabled)
+                self.update("config/runtime.json", lambda v: v["artifactPlan"].update(recordingEnabled=not enabled))
+                with self.assertRaisesRegex(RecipeError, "recording must match"):
+                    render_candidate(self.root, SLUG)
+        for invalid in (0, 1, None, "true"):
+            with self.subTest(invalid=invalid):
+                self.update(relative, lambda v: v["privacy"].update(recordingEnabled=invalid))
+                with self.assertRaisesRegex(RecipeError, "explicit recording choice"):
+                    load_instance(self.root, SLUG)
+
+    def test_real_business_renders_with_test_or_real_caller_data(self):
+        relative = f"instances/{SLUG}/recipe.json"
+        self.update(relative, lambda v: v["business"].update(name="Example Service", fictional=False))
+        self.approve()
+        payloads = []
+        for policy in ("synthetic_only", "real_callers"):
+            with self.subTest(policy=policy):
+                self.update(relative, lambda v: v["privacy"].update(liveData=policy))
+                candidate = render_candidate(self.root, SLUG)
+                self.assertIn("Example Service", candidate["systemPrompt"])
+                self.assertEqual(candidate["firstMessage"],
+                                 "Hello, I'm Mira, the automated message assistant for Example Service. "
+                                 "Would you like to leave a message for the team?")
+                payloads.append(candidate["assistantPayload"])
+        self.assertEqual(payloads[0], payloads[1])
+
+    def test_business_requires_explicit_boolean_and_message_only_purpose(self):
+        relative = f"instances/{SLUG}/recipe.json"
+        for invalid in (0, 1, None, "false"):
+            with self.subTest(invalid=invalid):
+                self.update(relative, lambda v: v["business"].update(fictional=invalid))
+                with self.assertRaisesRegex(RecipeError, "explicit boolean"):
+                    load_instance(self.root, SLUG)
+        self.update(relative, lambda v: v["business"].update(fictional=False, purpose="Book an appointment"))
+        with self.assertRaisesRegex(RecipeError, "message-only business purpose"):
+            load_instance(self.root, SLUG)
+
+    def test_caller_data_policy_must_be_explicit(self):
+        relative = f"instances/{SLUG}/recipe.json"
+        for invalid in (None, "", "real", True, ["real_callers"]):
+            with self.subTest(invalid=invalid):
+                self.update(relative, lambda v: v["privacy"].update(liveData=invalid))
+                with self.assertRaisesRegex(RecipeError, "liveData"):
+                    load_instance(self.root, SLUG)
+
     def test_stage_is_idempotent_private_and_does_not_promote(self):
         self.approve()
         candidate = stage_candidate(self.root, SLUG)
@@ -84,18 +137,18 @@ class RecipeTests(unittest.TestCase):
             path = self.root / relative
             self.assertTrue(path.resolve().is_relative_to(self.root / ".local"))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        self.assertFalse((instance_state(self.root, SLUG) / "prompts" /
+        self.assertFalse((InstanceState(self.root, SLUG).directory / "prompts" /
                           f"{SLUG}_vapi_system_prompt.txt").exists())
 
     def test_stage_refuses_divergent_draft_before_creating_other_artifacts(self):
         self.approve()
-        path = instance_state(self.root, SLUG) / "prompts/backups" / f"{SLUG}_vapi_system_prompt_refactor.txt"
+        path = InstanceState(self.root, SLUG).directory / "prompts/backups" / f"{SLUG}_vapi_system_prompt_refactor.txt"
         path.parent.mkdir(parents=True)
         path.write_text("A deliberately edited review draft.\n")
         with self.assertRaisesRegex(RecipeError, "divergent"):
             stage_candidate(self.root, SLUG)
         self.assertEqual(path.read_text(), "A deliberately edited review draft.\n")
-        self.assertFalse((instance_state(self.root, SLUG) / "candidate.json").exists())
+        self.assertFalse((InstanceState(self.root, SLUG).directory / "candidate.json").exists())
 
     def test_stale_voice_and_name_require_fresh_operator_selection(self):
         self.approve()
@@ -106,9 +159,9 @@ class RecipeTests(unittest.TestCase):
         record_voice_selection(self.root, SLUG, "Operator explicitly approved changed synthetic fixture voice")
         self.assertEqual(render_candidate(self.root, SLUG)["assistantPayload"]["voice"]["voiceId"],
                          "another-exact-fixture-voice")
-        backups = list(instance_state(self.root, SLUG).glob("voice-selection.*.json"))
+        backups = list(InstanceState(self.root, SLUG).directory.glob("voice-selection.*.json"))
         self.assertEqual(len(backups), 1)
-        self.assertEqual(json.loads(backups[0].read_text())["voice"]["voiceId"], "fFAtoTPtP0TtMyhbR3L9")
+        self.assertEqual(json.loads(backups[0].read_text())["voice"]["voiceId"], "NTqGiNK8P02i66yY2GOH")
         self.update(relative, lambda v: v["business"].update(assistantName="Other"))
         with self.assertRaisesRegex(RecipeError, "exact voice tuple"):
             render_candidate(self.root, SLUG)
@@ -160,7 +213,6 @@ class RecipeTests(unittest.TestCase):
         after = render_candidate(self.root, SLUG)
         self.assertEqual(after["assistantPayload"]["maxDurationSeconds"], 330)
         self.assertNotEqual(before["sourceHashes"]["runtime"], after["sourceHashes"]["runtime"])
-        self.assertEqual(after["reviewStatus"], "pending")
 
     def test_inherited_analysis_integration_and_fallback_are_rejected(self):
         self.approve()
@@ -210,50 +262,6 @@ class RecipeTests(unittest.TestCase):
         template.write_bytes(template.read_bytes().replace(b"\n", b"\r\n"))
         with self.assertRaisesRegex(RecipeError, "recorded provenance"):
             render_candidate(self.root, SLUG)
-
-    def test_phase_three_review_is_private_bound_and_does_not_promote(self):
-        self.approve()
-        before = render_candidate(self.root, SLUG)
-        approval = record_baseline_review(self.root, SLUG, "Synthetic operator Phase 3 approval")
-        self.assertEqual(approval["scope"], "phase3-baseline")
-        self.assertEqual(render_candidate(self.root, SLUG)["reviewStatus"], "approved_phase_3")
-        path = instance_state(self.root, SLUG) / "baseline-review.json"
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(load_instance(self.root, SLUG)["reviewStatus"], "pending")
-        self.assertFalse((instance_state(self.root, SLUG) / "prompts").exists())
-        after = render_candidate(self.root, SLUG)
-        self.assertEqual(after["assistantPayload"], before["assistantPayload"])
-        self.assertEqual(after["candidateStatus"], "provisional_unbound")
-
-    def test_runtime_or_business_changes_invalidate_baseline_review(self):
-        self.approve()
-        record_baseline_review(self.root, SLUG, "Synthetic operator approved original fixture")
-        self.update("config/runtime.json", lambda v: v.update(maxDurationSeconds=330))
-        self.assertEqual(render_candidate(self.root, SLUG)["reviewStatus"], "pending")
-        record_baseline_review(self.root, SLUG, "Synthetic operator approved updated runtime fixture")
-        self.assertEqual(render_candidate(self.root, SLUG)["reviewStatus"], "approved_phase_3")
-        self.update(f"instances/{SLUG}/recipe.json", lambda v: v["business"].update(name="Other Business"))
-        self.assertEqual(render_candidate(self.root, SLUG)["reviewStatus"], "pending")
-        self.assertEqual(len(list(instance_state(self.root, SLUG).glob("baseline-review.*.json"))), 1)
-
-    def test_mismatched_or_malformed_review_never_grants_approval(self):
-        self.approve()
-        record_baseline_review(self.root, SLUG, "Synthetic operator fixture approval")
-        path = instance_state(self.root, SLUG) / "baseline-review.json"
-        original = path.read_text()
-        for change in (
-                lambda v: v.update(slug="other"),
-                lambda v: v.update(assistantName="Other"),
-                lambda v: v.update(scope="live-provisioning"),
-                lambda v: v.update(candidateSha256="wrong"),
-                lambda v: v.update(approvalSource="")):
-            path.write_text(original)
-            value = json.loads(path.read_text())
-            change(value)
-            path.write_text(json.dumps(value) + "\n")
-            self.assertEqual(render_candidate(self.root, SLUG)["reviewStatus"], "pending")
-        path.write_text("invalid approval\n")
-        self.assertEqual(render_candidate(self.root, SLUG)["reviewStatus"], "pending")
 
 
 if __name__ == "__main__":

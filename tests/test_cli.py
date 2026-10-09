@@ -48,7 +48,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(preview.returncode, 0, preview.stderr)
         candidate = json.loads(preview.stdout)
         self.assertEqual(candidate["candidateStatus"], "provisional_unbound")
-        self.assertEqual(candidate["assistantPayload"]["voice"]["voiceId"], "fFAtoTPtP0TtMyhbR3L9")
+        self.assertEqual(candidate["assistantPayload"]["voice"]["voiceId"], "NTqGiNK8P02i66yY2GOH")
         self.assertNotIn("structuredOutputIds", candidate["assistantPayload"]["artifactPlan"])
         staged = self.run_cli("stage")
         self.assertEqual(staged.returncode, 0, staged.stderr)
@@ -88,6 +88,35 @@ class CliTests(unittest.TestCase):
         self.assertEqual(missing.returncode, 1)
         self.assertNotIn("Traceback", missing.stderr)
         self.assertFalse((self.package / ".local/messenger_recipe_demo/output-pending.json").exists())
+
+    def test_output_update_requires_explicit_live_intent(self):
+        result = self.run_cli("deploy", "--update-output")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("require --live", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.package / ".local").exists())
+
+    def test_saved_call_inspection_is_offline_and_attempts_are_bounded(self):
+        state = self.package / ".local/messenger_recipe_demo"
+        (state / "calls").mkdir(parents=True)
+        (state / "assistant-accepted.json").write_text(json.dumps({"id": "fixture-assistant"}))
+        (state / "output-accepted.json").write_text(json.dumps({"id": "fixture-output"}))
+        result = {"schemaVersion": "1.0.0", "outcome": "no_message", "completeness": "not_applicable",
+                  "callbackNumberConfirmed": False, "evidence": [], "uncertainties": []}
+        call = {"id": "fixture-call", "assistantId": "fixture-assistant",
+                "artifact": {"structuredOutputs": {"fixture-output": {"result": result}}}}
+        (state / "calls/fixture-call.attempt-2.json").write_text(json.dumps(call))
+        inspected = self.run_cli("inspect-call", "fixture-call", "--attempt", "2")
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        self.assertEqual(json.loads(inspected.stdout)["status"], "valid_shape_semantics_unproved")
+        for command in ("fetch-call", "inspect-call"):
+            invalid = self.run_cli(command, "fixture-call", "--attempt", "4")
+            self.assertEqual(invalid.returncode, 2)
+            self.assertNotIn("Traceback", invalid.stderr)
+        missing = self.run_cli("verify-deployment")
+        self.assertEqual(missing.returncode, 1)
+        self.assertNotIn("Traceback", missing.stderr)
+        self.assertFalse((state / "evidence").exists())
 
 
 if __name__ == "__main__":

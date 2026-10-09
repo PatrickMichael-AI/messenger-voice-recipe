@@ -9,17 +9,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-import uuid
 
-from .comparison import differences
 from .configuration import render_assistant
-from .deployment import Deployment, DeploymentError, digest, write_json
+from .deployment import Deployment, DeploymentError, accepted_id, digest
 from .output import render_output
 from .provider import resource_id
-from .recipe import (
-    RecipeError, _hash, _json, _private_write, _scalar, _text,
-    instance_state, load_instance, package_path, render_candidate,
-)
+from .recipe import _hash, _scalar, load_instance, render_candidate
+from .state import InstanceState, RecipeError, package_path
 
 
 def _prepared(root: Path, slug: str) -> dict:
@@ -39,75 +35,57 @@ def _prepared(root: Path, slug: str) -> dict:
                                        "assistantPayload": candidate["assistantPayload"]})}
 
 
-def _prompt_paths(slug: str) -> dict:
-    prefix = f".local/{slug}/prompts"
-    return {
-        "draft": f"{prefix}/backups/{slug}_vapi_system_prompt_refactor.txt",
-        "openingDraft": f"{prefix}/backups/{slug}_first_message_candidate.txt",
-        "prompt": f"{prefix}/{slug}_vapi_system_prompt.txt",
-        "opening": f"{prefix}/{slug}_first_message.txt",
-    }
-
-
-def _checked_drafts(root: Path, slug: str, prepared: dict) -> dict:
-    paths = _prompt_paths(slug)
+def _checked_drafts(state: InstanceState, prepared: dict) -> dict:
+    names = state.prompt_paths()
     candidate = prepared["candidate"]
-    # render_candidate already enforces format, all twenty template sections,
+    # render_candidate already enforces format, all twenty-one template sections,
     # unresolved-placeholder absence and the punctuated phrase-close contract.
-    if _text(package_path(root, paths["draft"])) != candidate["systemPrompt"]:
+    if state.read_text(names["draft"]) != candidate["systemPrompt"]:
         raise RecipeError("Staged system draft differs from current reviewed sources; stage and review again.")
-    if _text(package_path(root, paths["openingDraft"])) != candidate["firstMessage"] + "\n":
+    if state.read_text(names["openingDraft"]) != candidate["firstMessage"] + "\n":
         raise RecipeError("Staged opening differs from current reviewed sources; stage and review again.")
-    staged = _json(package_path(root, f".local/{slug}/candidate.json"))
+    staged = state.read_json(state.CANDIDATE)
     # Review-status labels are private history, not inputs to a new clone.
     for key in ("systemPrompt", "firstMessage", "assistantPayload", "sourceHashes"):
         if staged.get(key) != candidate[key]:
             raise RecipeError("Staged candidate differs from current sources; stage and review again.")
-    return paths
+    return names
 
 
 def promote(root: Path, slug: str, approval_source: str) -> dict:
     """Operator-confirmed promotion binds exact prompt, opening and runtime sources.
 
     The command's confirmation is its own explicit local review decision. It
-    does not borrow historical Phase 3 approval or authorize a live request.
+    does not authorize a live request.
     """
     _scalar(approval_source, "approval_source")
     prepared = _prepared(root, slug)
-    paths = _checked_drafts(root, slug, prepared)
+    state = InstanceState(root, slug)
+    names = _checked_drafts(state, prepared)
     contents = {"prompt": prepared["candidate"]["systemPrompt"],
                 "opening": prepared["candidate"]["firstMessage"] + "\n"}
     # Validate every destination first, then preserve superseded promoted files.
     for key in contents:
-        target = package_path(root, paths[key])
-        if target.exists():
-            _text(target)
+        if state.path(names[key]).exists():
+            state.read_text(names[key])
+    # Approval is written last. An interrupted replacement cannot grant
+    # approval for the new sources or a mixed pair of prompt files.
     for key, content in contents.items():
-        target = package_path(root, paths[key])
-        if target.exists() and _text(target) != content:
-            previous = _text(target)
-            _private_write(root, f".local/{slug}/prompts/backups/{target.name}.{uuid.uuid4().hex}.txt", previous)
-            # Approval is written last. An interrupted replacement cannot grant
-            # approval for the new sources or a mixed pair of prompt files.
-            target.unlink()
-        _private_write(root, paths[key], content)
+        state.supersede(names[key], content, backup_dir="prompts/backups")
     approval = {"scope": "local-promotion", "slug": slug,
                 "assistantName": prepared["candidate"]["assistantPayload"]["name"],
                 "promotionSha256": prepared["promotionSha256"], "approvalSource": approval_source}
-    approval_path = package_path(root, f".local/{slug}/promotion-review.json")
-    if approval_path.exists():
-        previous = _json(approval_path)
-        if previous != approval:
-            write_json(package_path(root, f".local/{slug}/promotion-review.{uuid.uuid4().hex}.json"), previous)
-    write_json(approval_path, approval)
-    return {"promotionSha256": prepared["promotionSha256"], "artifactPaths": paths,
+    state.supersede("promotion-review.json", approval)
+    return {"promotionSha256": prepared["promotionSha256"],
+            "artifactPaths": {key: state.relative(name) for key, name in names.items()},
             "status": "promoted_locally", "liveAuthorized": False}
 
 
 def require_promotion(root: Path, slug: str) -> dict:
     prepared = _prepared(root, slug)
-    paths = _checked_drafts(root, slug, prepared)
-    approval = _json(package_path(root, f".local/{slug}/promotion-review.json"))
+    state = InstanceState(root, slug)
+    names = _checked_drafts(state, prepared)
+    approval = state.read_json("promotion-review.json")
     if (approval.get("scope") != "local-promotion" or approval.get("slug") != slug
             or approval.get("assistantName") != prepared["candidate"]["assistantPayload"]["name"]
             or approval.get("promotionSha256") != prepared["promotionSha256"]
@@ -116,7 +94,7 @@ def require_promotion(root: Path, slug: str) -> dict:
         raise RecipeError("Local promotion approval is absent or stale; review and promote current sources.")
     for key, content in (("prompt", prepared["candidate"]["systemPrompt"]),
                          ("opening", prepared["candidate"]["firstMessage"] + "\n")):
-        if _text(package_path(root, paths[key])) != content:
+        if state.read_text(names[key]) != content:
             raise RecipeError("Promoted artifact differs from current approved sources; review and promote again.")
     return prepared
 
@@ -138,64 +116,52 @@ def deployment_preview(root: Path, slug: str) -> dict:
             "bindingStatus": "provisional_unbound"}
 
 
-def _existing_output(root: Path, slug: str, definition: dict, provider) -> dict:
-    accepted = _json(package_path(root, f".local/{slug}/output-accepted.json"))
-    identity = resource_id(accepted.get("id"))
-    if accepted.get("payloadSha256") != digest(definition) or accepted.get("intent") != definition:
-        raise DeploymentError("Accepted output binding conflicts with the reviewed definition; do not create a duplicate.")
-    response = provider.get_output(identity)
-    write_json(package_path(root, f".local/{slug}/evidence/output-get-{uuid.uuid4().hex}.json"), response)
-    if response.get("id") != identity or differences(definition, response):
-        raise DeploymentError("Accepted output GET differs from the reviewed definition; binding refused.")
-    return response
+def _bound_assistant(prepared: dict, output_id: str) -> dict:
+    candidate = prepared["candidate"]["assistantPayload"]
+    voice = {key: candidate["voice"][key] for key in ("provider", "voiceId", "model")}
+    return render_assistant(deepcopy(candidate), name=candidate["name"],
+                            prompt=prepared["candidate"]["systemPrompt"],
+                            opening=candidate["firstMessage"], voice=voice,
+                            output_ids=[output_id])
+
+
+def verify_deployment(root: Path, slug: str, provider) -> dict:
+    """GET-only verification; evidence writes never update accepted state.
+
+    The fetched API body alone cannot prove dashboard publication or call behavior.
+    """
+    prepared = require_promotion(root, slug)
+    state = InstanceState(root, slug)
+    intents = {"output": prepared["outputDefinition"],
+               "assistant": _bound_assistant(prepared, accepted_id(state, "output"))}
+    report = Deployment(provider, state).check(intents)
+    drift = {kind: result["differences"] for kind, result in report.items()}
+    evidence = {kind: str(result["evidence"].relative_to(Path(root).absolute()))
+                for kind, result in report.items()}
+    return {"mode": "read_only", "status": "owned_setting_drift" if any(drift.values()) else "owned_settings_match",
+            "assistantId": report["assistant"]["id"], "outputId": report["output"]["id"],
+            "reviewSha256": prepared["reviewSha256"], "differences": drift, "evidencePaths": evidence,
+            "publicationStatus": "not_proved_by_api_get", "callBehavior": "not_yet_proved"}
 
 
 def deploy(root: Path, slug: str, provider, *, reconcile_output_id: str | None = None,
-           reconcile_assistant_id: str | None = None) -> dict:
+           reconcile_assistant_id: str | None = None, update_output: bool = False) -> dict:
     """Run the explicit live command against one package-owned output and assistant."""
     prepared = require_promotion(root, slug)
-    state = instance_state(root, slug)
+    deployment = Deployment(provider, InstanceState(root, slug))
+    # An extraction change needs explicit --update-output; assistant changes
+    # follow the promoted sources.
+    requests = {"output": {"reconcile_id": reconcile_output_id, "update": update_output},
+                "assistant": {"reconcile_id": reconcile_assistant_id, "update": True}}
     # Reject invalid recovery intent before making any mutation or provider call.
-    for kind, supplied in (("output", reconcile_output_id), ("assistant", reconcile_assistant_id)):
-        if supplied is not None:
-            resource_id(supplied)
-            if not package_path(root, f".local/{slug}/{kind}-pending.json").exists():
-                raise DeploymentError(f"No unresolved {kind} creation to reconcile.")
-    deployment = Deployment(provider, state)
-    definition = prepared["outputDefinition"]
-    output_pending = package_path(root, f".local/{slug}/output-pending.json")
-    output_accepted = package_path(root, f".local/{slug}/output-accepted.json")
-    if output_pending.exists():
-        if reconcile_output_id is None:
-            raise DeploymentError("Unresolved output creation: rerun with --reconcile-output-id after identifying it; do not retry.")
-        if output_accepted.exists():
-            raise DeploymentError("Output has both accepted and pending state; review the conflict before proceeding.")
-        output = deployment.reconcile("output", reconcile_output_id, definition)
-    elif output_accepted.exists():
-        output = _existing_output(root, slug, definition, provider)
-    else:
-        output = deployment.create("output", definition)
+    actions = {kind: deployment.plan(kind, **request) for kind, request in requests.items()}
+    if update_output and actions["output"] != "update":
+        raise DeploymentError("Output update requires an accepted existing binding and no unresolved creation.")
+    output = deployment.ensure("output", prepared["outputDefinition"], **requests["output"])
     identity = resource_id(output.get("id"))
-    candidate = prepared["candidate"]["assistantPayload"]
-    voice = {key: candidate["voice"][key] for key in ("provider", "voiceId", "model")}
-    payload = render_assistant(deepcopy(candidate), name=candidate["name"],
-                               prompt=prepared["candidate"]["systemPrompt"],
-                               opening=candidate["firstMessage"], voice=voice,
-                               output_ids=[identity])
     # render_assistant rejects provider-owned identity, but accepts our derived
     # model messages; both source and bound candidate retain all other settings.
-    assistant_pending = package_path(root, f".local/{slug}/assistant-pending.json")
-    assistant_accepted = package_path(root, f".local/{slug}/assistant-accepted.json")
-    if assistant_pending.exists():
-        if reconcile_assistant_id is None:
-            raise DeploymentError("Unresolved assistant creation: rerun with --reconcile-assistant-id after identifying it; do not retry.")
-        if assistant_accepted.exists():
-            raise DeploymentError("Assistant has both accepted and pending state; review the conflict before proceeding.")
-        assistant = deployment.reconcile("assistant", reconcile_assistant_id, payload)
-    elif assistant_accepted.exists():
-        assistant = deployment.update_assistant(payload)
-    else:
-        assistant = deployment.create("assistant", payload)
+    assistant = deployment.ensure("assistant", _bound_assistant(prepared, identity), **requests["assistant"])
     return {"mode": "live", "status": "accepted_independent_readback",
             "assistantId": assistant["id"], "outputId": identity,
             "reviewSha256": prepared["reviewSha256"],

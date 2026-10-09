@@ -2,9 +2,9 @@ Third-party notices for the standalone Messenger Recipe
 
 Recipe-owned Python modules were adapted from PatrickMichael-AI/pm-voice-agents
 at b8671f1. Bundled message-only prompt and placeholder contract provenance and
-SHA-256 values are recorded in templates/provenance.json. No licence grant for
-these first-party materials is established here; the operator must choose a
-publication licence before a public release.
+SHA-256 values are recorded in templates/provenance.json. The project licence
+is Apache License 2.0, selected by the operator in the public repository.
+The dependency notices below retain their respective upstream licences.
 
 Dependencies are installed separately through requirements.txt. Their source is
 not vendored in this package. The following licence files are reproduced from

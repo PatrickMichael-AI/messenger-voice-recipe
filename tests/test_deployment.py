@@ -2,16 +2,19 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import httpx
 
 from messenger_recipe.comparison import differences
 from messenger_recipe.configuration import render_assistant
-from messenger_recipe.deployment import Deployment, DeploymentError, write_json
+from messenger_recipe.deployment import Deployment, DeploymentError, digest
 from messenger_recipe.provider import ProviderError, VapiProvider
+from messenger_recipe.state import InstanceState, RecipeError
 
 
 INTENT = {"name": "Synthetic fixture", "artifactPlan": {"recordingEnabled": False,
@@ -20,7 +23,23 @@ INTENT = {"name": "Synthetic fixture", "artifactPlan": {"recordingEnabled": Fals
           "model": {"fallbackModels": ["gpt-4.1-mini", "gpt-4.1"]}}
 
 
+def fixture_state(directory) -> InstanceState:
+    """Deployment state under a temporary package root."""
+    return InstanceState(Path(directory), "fixture")
+
+
 class ComparisonTests(unittest.TestCase):
+    def test_json_numbers_compare_by_value_without_boolean_or_string_coercion(self):
+        for requested, saved in ((1.0, 1), (1, 1.0), (0.0, 0), (0, 0.0)):
+            with self.subTest(requested=requested, saved=saved):
+                self.assertEqual(differences({"voice": {"speed": requested}},
+                                             {"voice": {"speed": saved}}), [])
+        for requested, saved in ((1.0, 1.01), (1.0, True), (0.0, False),
+                                 (1.0, "1"), (False, 0), (True, 1.0)):
+            with self.subTest(requested=requested, saved=saved):
+                self.assertEqual(differences({"voice": {"speed": requested}},
+                                             {"voice": {"speed": saved}}), ["voice.speed"])
+
     def test_defaults_and_known_empty_normalization(self):
         actual = copy.deepcopy(INTENT)
         actual.pop("serverMessages")
@@ -53,31 +72,139 @@ class ComparisonTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
-    def test_validation_details_stay_private_and_failed_create_is_not_retried(self):
+    def test_validation_rejection_is_archived_without_automatic_retry(self):
         body = {"message": ["property recordingPlan should not exist"],
-                "statusCode": 400}
+                "error": "Bad Request", "statusCode": 400}
         requests = []
 
         def handler(request):
             requests.append(request)
-            return httpx.Response(400, json=body)
+            if len(requests) == 1:
+                return httpx.Response(400, json=body)
+            return httpx.Response(200, json=dict(copy.deepcopy(INTENT), id="fixture"))
 
         with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory)
+            state = fixture_state(directory).directory
             with VapiProvider("offline-secret-never-saved",
                               transport=httpx.MockTransport(handler)) as provider:
-                deployment = Deployment(provider, state)
+                deployment = Deployment(provider, fixture_state(directory))
                 with self.assertRaises(ProviderError) as raised:
-                    deployment.create("assistant", INTENT)
+                    deployment.ensure("assistant", INTENT)
                 self.assertNotIn("recordingPlan", str(raised.exception))
-                with self.assertRaises(DeploymentError):
-                    deployment.create("assistant", INTENT)
+                self.assertEqual(len(requests), 1)
+                self.assertFalse((state / "assistant-pending.json").exists())
+                self.assertFalse((state / "assistant-accepted.json").exists())
+                rejected = list(state.glob("assistant-rejected-*.json"))
+                self.assertEqual(len(rejected), 1)
+                archive = json.loads(rejected[0].read_text())
+                self.assertEqual(archive["intent"], INTENT)
+                self.assertEqual(archive["status"], "validation-rejected")
+                self.assertIsNone(archive["id"])
+                self.assertEqual(rejected[0].stat().st_mode & 0o777, 0o600)
+                deployment.ensure("assistant", INTENT)
             files = list(state.glob("evidence/assistant-error-*.json"))
             self.assertEqual(len(files), 1)
             self.assertEqual(json.loads(files[0].read_text())["body"], body)
             self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
             self.assertNotIn("offline-secret-never-saved", files[0].read_text())
-        self.assertEqual(len(requests), 1)
+            self.assertIn(str(files[0]), str(raised.exception))
+        self.assertEqual([request.method for request in requests], ["POST", "POST", "GET"])
+
+    def test_uncertain_create_errors_keep_pending_blocker(self):
+        validation = {"message": ["schema.type is invalid"], "error": "Bad Request", "statusCode": 400}
+        for status, body in ((400, "Bad Request"), (400, {"message": "Unknown failure"}),
+                             (400, dict(validation, id="possible-resource")),
+                             (400, dict(validation, statusCode=422)),
+                             (409, validation), (500, validation)):
+            with self.subTest(status=status, body=body), tempfile.TemporaryDirectory() as directory:
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(status, json=body)
+                with VapiProvider("offline-fixture", transport=httpx.MockTransport(handler)) as provider:
+                    deployment = Deployment(provider, fixture_state(directory))
+                    with self.assertRaises(ProviderError):
+                        deployment.ensure("output", INTENT)
+                    with self.assertRaises(DeploymentError):
+                        deployment.ensure("output", INTENT)
+                self.assertEqual(len(requests), 1)
+                self.assertTrue((fixture_state(directory).directory / "output-pending.json").exists())
+                self.assertFalse(list(fixture_state(directory).directory.glob("output-rejected-*.json")))
+
+    def test_get_validation_error_after_successful_post_keeps_pending(self):
+        requests = []
+        def handler(request):
+            requests.append(request)
+            if request.method == "POST":
+                return httpx.Response(200, json=dict(INTENT, id="fixture"))
+            return httpx.Response(400, json={"message": ["schema.type is invalid"],
+                                            "error": "Bad Request", "statusCode": 400})
+        with tempfile.TemporaryDirectory() as directory:
+            with VapiProvider("offline-fixture", transport=httpx.MockTransport(handler)) as provider:
+                deployment = Deployment(provider, fixture_state(directory))
+                with self.assertRaises(ProviderError):
+                    deployment.ensure("output", INTENT)
+                with self.assertRaises(DeploymentError):
+                    deployment.ensure("output", INTENT)
+            pending = json.loads((fixture_state(directory).directory / "output-pending.json").read_text())
+            self.assertEqual(pending["id"], "fixture")
+            self.assertFalse(list(fixture_state(directory).directory.glob("output-rejected-*.json")))
+        self.assertEqual([request.method for request in requests], ["POST", "GET"])
+
+    def test_validation_rejection_archive_failure_keeps_pending(self):
+        def handler(request):
+            return httpx.Response(422, json={"message": ["schema.type is invalid"],
+                                            "error": "Unprocessable Entity", "statusCode": 422})
+        with tempfile.TemporaryDirectory() as directory:
+            state = fixture_state(directory).directory
+            with VapiProvider("offline-fixture", transport=httpx.MockTransport(handler)) as provider:
+                deployment = Deployment(provider, fixture_state(directory))
+                original_replace = InstanceState.replace
+                def fail_archive_record(instance, name, content):
+                    if isinstance(content, dict) and content.get("status") == "validation-rejected":
+                        raise OSError("Synthetic archive write failure")
+                    original_replace(instance, name, content)
+                with patch.object(InstanceState, "replace", autospec=True, side_effect=fail_archive_record):
+                    with self.assertRaises(OSError):
+                        deployment.ensure("output", INTENT)
+                self.assertTrue((state / "output-pending.json").exists())
+                self.assertFalse(list(state.glob("output-rejected-*.json")))
+                self.assertEqual(len(list(state.glob("evidence/output-error-*.json"))), 1)
+                with self.assertRaises(DeploymentError):
+                    deployment.ensure("output", INTENT)
+
+    def test_explicit_422_rejection_is_archived(self):
+        def handler(request):
+            return httpx.Response(422, json={"message": ["schema.type is invalid"],
+                                            "error": "Unprocessable Entity", "statusCode": 422})
+        with tempfile.TemporaryDirectory() as directory:
+            state = fixture_state(directory).directory
+            with VapiProvider("offline-fixture", transport=httpx.MockTransport(handler)) as provider:
+                with self.assertRaises(ProviderError):
+                    Deployment(provider, fixture_state(directory)).ensure("output", INTENT)
+            self.assertFalse((state / "output-pending.json").exists())
+            self.assertEqual(len(list(state.glob("output-rejected-*.json"))), 1)
+
+    def test_validation_rejection_failed_archive_move_keeps_pending(self):
+        def handler(request):
+            return httpx.Response(400, json={"message": ["schema.type is invalid"],
+                                            "error": "Bad Request", "statusCode": 400})
+        with tempfile.TemporaryDirectory() as directory:
+            state = fixture_state(directory).directory
+            original_replace = os.replace
+            def fail_archive_move(source, target):
+                if Path(target).name.startswith("output-rejected-"):
+                    raise OSError("Synthetic archive move failure")
+                original_replace(source, target)
+            with VapiProvider("offline-fixture", transport=httpx.MockTransport(handler)) as provider:
+                deployment = Deployment(provider, fixture_state(directory))
+                with patch("messenger_recipe.state.os.replace", side_effect=fail_archive_move):
+                    with self.assertRaises(OSError):
+                        deployment.ensure("output", INTENT)
+                self.assertTrue((state / "output-pending.json").exists())
+                self.assertFalse(list(state.glob("output-rejected-*.json")))
+                with self.assertRaises(DeploymentError):
+                    deployment.ensure("output", INTENT)
 
     def test_documented_paths_lossless_body_and_response(self):
         requests = []
@@ -203,54 +330,89 @@ class FixtureProvider:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_integer_voice_speed_readback_reconciles_existing_assistant_get_only(self):
+        intent = dict(copy.deepcopy(INTENT), voice={"speed": 1.0})
+        self.provider.live["voice"] = {"speed": 1}
+        self.instance.replace("assistant-pending.json", {
+            "id": "fixture", "status": "reconciliation-required",
+            "payloadSha256": digest(intent)})
+        result = self.deployment.ensure("assistant", intent, reconcile_id="fixture")
+        self.assertEqual(result["voice"]["speed"], 1)
+        self.assertEqual(self.provider.posts, 0)
+        self.assertEqual(self.provider.patches, 0)
+        self.assertFalse((self.state / "assistant-pending.json").exists())
+        self.assertTrue((self.state / "assistant-accepted.json").exists())
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.state = Path(self.directory.name)
+        self.instance = fixture_state(self.directory.name)
+        self.state = self.instance.directory
         self.provider = FixtureProvider()
-        self.deployment = Deployment(self.provider, self.state)
+        self.deployment = Deployment(self.provider, self.instance)
 
-    def test_create_verified_and_duplicate_refused(self):
-        self.deployment.create("assistant", INTENT)
+    def test_create_verified_and_rerun_never_duplicates(self):
+        self.deployment.ensure("assistant", INTENT)
         self.assertFalse((self.state / "assistant-pending.json").exists())
-        self.assertEqual((self.state / "assistant-accepted.json").stat().st_mode & 0o777, 0o600)
-        with self.assertRaises(DeploymentError):
-            self.deployment.create("assistant", INTENT)
+        accepted = self.state / "assistant-accepted.json"
+        self.assertEqual(accepted.stat().st_mode & 0o777, 0o600)
+        before = accepted.read_bytes()
+        self.deployment.ensure("assistant", INTENT)
+        self.assertEqual(accepted.read_bytes(), before)
+        with self.assertRaisesRegex(DeploymentError, "binding conflicts"):
+            self.deployment.ensure("assistant", dict(INTENT, name="changed"))
         self.assertEqual(self.provider.posts, 1)
+        self.assertEqual(self.provider.patches, 0)
+
+    def test_plan_is_read_only_and_refuses_invalid_recovery(self):
+        self.assertEqual(self.deployment.plan("assistant"), "create")
+        with self.assertRaisesRegex(DeploymentError, "No unresolved assistant"):
+            self.deployment.plan("assistant", reconcile_id="fixture")
+        with self.assertRaises(ValueError):
+            self.deployment.plan("assistant", reconcile_id="../escape")
+        self.deployment.ensure("assistant", INTENT)
+        self.assertEqual(self.deployment.plan("assistant"), "check")
+        self.assertEqual(self.deployment.plan("assistant", update=True), "update")
+        self.instance.replace("assistant-pending.json", {"payloadSha256": digest(INTENT)})
+        with self.assertRaisesRegex(DeploymentError, "Unresolved assistant creation"):
+            self.deployment.plan("assistant")
+        with self.assertRaisesRegex(DeploymentError, "both accepted and pending"):
+            self.deployment.plan("assistant", reconcile_id="fixture")
+        self.assertEqual((self.provider.posts, self.provider.patches), (1, 0))
 
     def test_ambiguous_create_blocks_retry_and_reconciles_get_only(self):
         for kind in ("assistant", "output"):
             with self.subTest(kind=kind):
                 self.provider.fail_post = True
                 with self.assertRaises(ProviderError):
-                    self.deployment.create(kind, INTENT)
+                    self.deployment.ensure(kind, INTENT)
                 with self.assertRaises(DeploymentError):
-                    self.deployment.create(kind, INTENT)
+                    self.deployment.ensure(kind, INTENT)
                 with self.assertRaises(DeploymentError):
-                    self.deployment.reconcile(kind, "fixture", dict(INTENT, name="changed"))
-                self.deployment.reconcile(kind, "fixture", INTENT)
+                    self.deployment.ensure(kind, dict(INTENT, name="changed"), reconcile_id="fixture")
+                self.deployment.ensure(kind, INTENT, reconcile_id="fixture")
         self.assertEqual(self.provider.posts, 2)
         self.assertEqual(self.provider.patches, 0)
 
     def test_failed_get_or_drift_not_accepted(self):
         self.provider.fail_get = True
         with self.assertRaises(ProviderError):
-            self.deployment.create("assistant", INTENT)
+            self.deployment.ensure("assistant", INTENT)
         self.assertFalse((self.state / "assistant-accepted.json").exists())
         self.provider.fail_get = False
         self.provider.live["endCallPhrases"] = ["changed"]
         with self.assertRaises(DeploymentError):
-            self.deployment.reconcile("assistant", "fixture", INTENT)
+            self.deployment.ensure("assistant", INTENT, reconcile_id="fixture")
         self.assertTrue((self.state / "assistant-pending.json").exists())
 
     def test_noop_and_remote_drift_protect_update(self):
-        self.deployment.create("assistant", INTENT)
-        self.deployment.update_assistant(INTENT)
+        self.deployment.ensure("assistant", INTENT)
+        self.deployment.ensure("assistant", INTENT, update=True)
         self.assertEqual(self.provider.patches, 0)
         previous = (self.state / "assistant-accepted.json").read_bytes()
         self.provider.live["artifactPlan"]["recordingEnabled"] = True
         with self.assertRaises(DeploymentError):
-            self.deployment.update_assistant(dict(INTENT, name="new"))
+            self.deployment.ensure("assistant", dict(INTENT, name="new"), update=True)
         self.assertEqual(self.provider.patches, 0)
         self.assertEqual((self.state / "assistant-accepted.json").read_bytes(), previous)
 
@@ -258,29 +420,20 @@ class RecoveryTests(unittest.TestCase):
         before = copy.deepcopy(INTENT)
         before["serverMessages"] = ["end-of-call-report"]
         self.provider.live.update(copy.deepcopy(before))
-        self.deployment.create("assistant", before)
-        self.deployment.update_assistant(INTENT)
+        self.deployment.ensure("assistant", before)
+        self.deployment.ensure("assistant", INTENT, update=True)
         self.assertEqual(self.provider.live["serverMessages"], [])
         self.assertEqual(self.provider.live["artifactPlan"], INTENT["artifactPlan"])
 
     def test_symlink_evidence_does_not_escape_local_state(self):
         outside = self.state / "outside"
-        outside.mkdir()
+        outside.mkdir(parents=True)
         (self.state / "evidence").symlink_to(outside, target_is_directory=True)
-        with self.assertRaises(DeploymentError):
-            self.deployment.create("assistant", INTENT)
+        with self.assertRaises(RecipeError):
+            self.deployment.ensure("assistant", INTENT)
         self.assertEqual(list(outside.iterdir()), [])
         self.assertTrue((self.state / "assistant-pending.json").exists())
         self.assertFalse((self.state / "assistant-accepted.json").exists())
-
-    def test_private_write_rejects_file_symlink(self):
-        target = self.state / "original.json"
-        target.write_text("Preserved\n")
-        link = self.state / "linked.json"
-        link.symlink_to(target)
-        with self.assertRaises(DeploymentError):
-            write_json(link, {"overwrite": True})
-        self.assertEqual(target.read_text(), "Preserved\n")
 
 
 if __name__ == "__main__":

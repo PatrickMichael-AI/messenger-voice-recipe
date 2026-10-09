@@ -34,7 +34,7 @@ def resource_id(value: str) -> str:
 
 
 class VapiProvider:
-    """Six documented operations; transport may be injected for offline tests."""
+    """Documented resource operations; transport may be injected for offline tests."""
 
     def __init__(self, token: str, *, transport: httpx.BaseTransport | None = None):
         if not isinstance(token, str) or not token.strip():
@@ -93,6 +93,9 @@ class VapiProvider:
 
     def get_output(self, output_id: str) -> dict:
         return self._request("GET", f"structured-output/{resource_id(output_id)}")
+
+    def update_output(self, output_id: str, payload: dict[str, Any]) -> dict:
+        return self._request("PATCH", f"structured-output/{resource_id(output_id)}?schemaOverride=true", payload)
 
     def get_call(self, call_id: str) -> dict:
         return self._request("GET", f"call/{resource_id(call_id)}")
