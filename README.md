@@ -116,7 +116,7 @@ Talk is the included test route. Buying or attaching a telephone number, inbound
 
 ## Results and privacy
 
-[config/structured-output.json](config/structured-output.json) owns extraction instructions and model selection. [result/enquiry-result.v1.schema.json](result/enquiry-result.v1.schema.json) owns the canonical result contract.
+[config/structured-output.json](config/structured-output.json) owns extraction instructions and model selection. [result/enquiry-result.v2.schema.json](result/enquiry-result.v2.schema.json) owns the current canonical result contract, version `2.0.0`. The Recipe package version remains `0.1.0`.
 
 | Result | Meaning |
 | --- | --- |
@@ -128,7 +128,15 @@ Talk is the included test route. Buying or attaching a telephone number, inbound
 
 Numbers come only from caller speech, including when the caller says “use this number”; inbound caller ID is not used. Corrections replace earlier values and require fresh confirmation. Choosing to call back retains an already permitted message unless the caller withdraws it. Saved messages are written for the receiving team and preserve whose request or idea is being discussed.
 
+Consent evidence must quote the caller with `speaker: "caller"`. An enquiry includes the caller's acceptance of message taking, such as “Yes, please”, or a direct request, such as “Please ask the team to discuss my idea”. Mira's offer, acknowledgement or closing cannot establish caller permission; silence or a name or number alone does not establish it either. One caller quote may support both `consent` and `message`. Later refusal or withdrawal overrides earlier permission and is evidenced by the caller's own words; suppressed personal details stay excluded. The extractor must not invent acceptance or a consent quote when none exists.
+
+Every current result includes separate Boolean `messageConfirmed` and `callbackNumberConfirmed` fields. A complete enquiry requires both to be true. `messageConfirmed` means the caller explicitly accepted the latest proposed message after the assistant read it back and asked “Is that correct?”. Evidence labels `messageReadback` and `messageConfirmation` identify that assistant turn and caller response; supplied content and corrections use `message`. A correction or addition resets message confirmation until the changed summary is confirmed. Agreement to a number, silence and “no additions” do not confirm a message. A clear unconfirmed request remains partial with `messageConfirmed: false`; an unclear message is omitted. Non-enquiry outcomes omit captured values and set both flags false.
+
 Raw Vapi results use empty strings for absent `callerName`, `message` and `callbackNumber`. The included [normalizer and validator](messenger_recipe/output.py) converts only those empty values to omissions and checks the canonical schema. A future consumer must apply the same normalization and validation. Missing extraction is a processing failure, not a fabricated `no_message` result.
+
+**Operator action:** review consent quotes against the caller turns alongside the existing message and number checks. Shape validation alone cannot establish permission or whether the extractor followed this evidence rule.
+
+Saved `1.0.0` results remain readable under the [historical schema](result/enquiry-result.v1.schema.json). They retain their version and evidence labels; the reader never adds or infers `messageConfirmed`. Their `complete` value does not establish explicit message confirmation. New deployments require `2.0.0`.
 
 Generated prompts, approvals, credentials, provider IDs and call evidence are excluded from Git by [.gitignore](.gitignore). Recordings, transcripts and results can contain caller details. The configuration records a 14-day local content-retention target, but no automatic deletion runner is included. Provider retention is managed separately.
 
@@ -141,7 +149,7 @@ mkdir -p instances/maple_demo
 cp instances/messenger_recipe_demo/recipe.json instances/maple_demo/recipe.json
 ```
 
-**Operator action:** in the new JSON, set `slug` to `maple_demo`, `business.name` to `Maple Studio` and `business.assistantName` to `Robin`. Choose and approve its exact voice. Keep the supported fixed contract. Use a short slug: the generated output name `<slug>-enquiry-v1` must fit within 40 characters.
+**Operator action:** in the new JSON, set `slug` to `maple_demo`, `business.name` to `Maple Studio` and `business.assistantName` to `Robin`. Choose and approve its exact voice. Keep the supported fixed contract. Use a short slug: the generated output name `<slug>-enquiry-v2` must fit within 40 characters.
 
 **Operator action plus local CLI action:** record this instance's voice selection.
 
@@ -181,6 +189,10 @@ cp instances/messenger_recipe_demo/recipe.json instances/maple_demo/recipe.json
 ```
 
 This retains the output and assistant IDs, refuses unexplained remote drift, archives the previous accepted definition and verifies the update by GET. A lost PATCH response can be reconciled by a later matching GET without another PATCH.
+
+**Operator action — upgrade an existing `1.0.0` instance:** set its `result.version` to `2.0.0` and `result.schemaRef` to `result/enquiry-result.v2.schema.json`. Review the new extraction definition and separate message-confirmation evidence. The instance file participates in the approval hash, so this contract upgrade requires restaging and local promotion even when the speaking prompt text is unchanged.
+
+**CLI action:** run `stage --refresh` and offline `deploy` as above. **Operator action plus local CLI action:** review that preview, then run `promote --confirm`. **Operator action plus live CLI action:** after approving the live update, run `deploy --live --update-output`. Keep existing bindings and saved calls; do not rewrite historical results. **Operator action:** before release, use Talk to check a confirmed message, a corrected message with fresh confirmation, and a clear message ending before confirmation. Review each saved result alongside the conversation and recording.
 
 If creation stopped with an uncertain response, review the private diagnostics and identify the exact resource in Vapi. **Operator action plus live CLI action:** supply the matching ID for reconciliation.
 

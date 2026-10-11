@@ -26,14 +26,14 @@ def quote(field, speaker, text):
 
 
 COMPLETE = {
-    "schemaVersion": "1.0.0", "outcome": "enquiry", "completeness": "complete",
+    "schemaVersion": "2.0.0", "outcome": "enquiry", "completeness": "complete",
     "callerName": "Alex", "message": "Alex would like a call about repairing Alex's chair.",
-    "callbackNumber": "+12025550123", "callbackNumberConfirmed": True,
+    "messageConfirmed": True, "callbackNumber": "+12025550123", "callbackNumberConfirmed": True,
     "evidence": [quote("consent", "caller", "Yes, please."),
                  quote("callerName", "caller", "Alex."),
                  quote("message", "caller", "Please call about repairing my chair."),
-                 quote("message", "assistant", "You would like a call about repairing your chair. Is that correct?"),
-                 quote("message", "caller", "Yes, that is correct."),
+                 quote("messageReadback", "assistant", "You would like a call about repairing your chair. Is that correct?"),
+                 quote("messageConfirmation", "caller", "Yes, that is correct."),
                  quote("callbackNumber", "caller", "Plus one, two zero two, five five five, zero one two three."),
                  quote("callbackReadback", "assistant", "Plus one, two zero two, five five five, zero one two three. Is that correct?"),
                  quote("callbackConfirmation", "caller", "Yes, correct.")],
@@ -42,8 +42,8 @@ COMPLETE = {
 
 
 def no_message(outcome, evidence=None):
-    return {"schemaVersion": "1.0.0", "outcome": outcome, "completeness": "not_applicable",
-            "callbackNumberConfirmed": False, "evidence": evidence or [], "uncertainties": []}
+    return {"schemaVersion": "2.0.0", "outcome": outcome, "completeness": "not_applicable",
+            "messageConfirmed": False, "callbackNumberConfirmed": False, "evidence": evidence or [], "uncertainties": []}
 
 
 CORRECTED = deepcopy(COMPLETE)
@@ -54,9 +54,9 @@ CORRECTED["evidence"] += [
     quote("callbackReadback", "assistant", "Plus one, two zero two, five five five, zero one two four. Is that correct?"),
     quote("callbackConfirmation", "caller", "Yes, that's right."),
 ]
-PARTIAL = {"schemaVersion": "1.0.0", "outcome": "enquiry", "completeness": "partial",
+PARTIAL = {"schemaVersion": "2.0.0", "outcome": "enquiry", "completeness": "partial",
            "callerName": "Alex", "message": "Alex would like a call about repairing Alex's chair.",
-           "callbackNumberConfirmed": False, "evidence": deepcopy(COMPLETE["evidence"][:5]),
+           "messageConfirmed": True, "callbackNumberConfirmed": False, "evidence": deepcopy(COMPLETE["evidence"][:5]),
            "uncertainties": ["No spoken callback number was supplied."]}
 UNCONFIRMED = deepcopy(CORRECTED)
 UNCONFIRMED.update(completeness="partial", callbackNumberConfirmed=False,
@@ -94,6 +94,67 @@ SYNTHETIC_EXPECTATIONS = {
 }
 
 
+# Manual consent extraction expectations; offline checks do not run a model.
+direct_request = deepcopy(COMPLETE)
+direct_request.update(callerName="Jamie", message="Jamie would like the team to discuss Jamie's idea.",
+                      callbackNumber="2025550144")
+direct_request["evidence"] = [
+    quote("callerName", "caller", "I'm Jamie."),
+    quote("consent", "caller", "Please ask the team to discuss my idea."),
+    quote("message", "caller", "Please ask the team to discuss my idea."),
+    quote("messageReadback", "assistant", "You would like the team to discuss your idea. Is that correct?"),
+    quote("messageConfirmation", "caller", "Yes, correct."),
+    quote("callbackNumber", "caller", "2 0 2 5 5 5 0 1 4 4."),
+    quote("callbackReadback", "assistant", "2 0 2 5 5 5 0 1 4 4. Is that correct?"),
+    quote("callbackConfirmation", "caller", "Yes. Correct."),
+]
+CONSENT_EXPECTATIONS = {
+    "explicit_acceptance": deepcopy(SYNTHETIC_EXPECTATIONS["complete"]),
+    "direct_caller_request": {
+        "transcript": "\n".join((
+            "Assistant: Would you like to leave a message for the team?",
+            "Caller: I'm Jamie. Please ask the team to discuss my idea.",
+            "Assistant: You would like the team to discuss your idea. Is that correct?",
+            "Caller: Yes, correct.",
+            "Assistant: Your callback number?",
+            "Caller: 2 0 2 5 5 5 0 1 4 4.",
+            "Assistant: 2 0 2 5 5 5 0 1 4 4. Is that correct?",
+            "Caller: Yes. Correct.",
+        )),
+        "result": direct_request,
+    },
+    "accepted_intake_ends_before_message": {
+        "transcript": "Assistant: Would you like to leave a message?\nCaller: Yes, please.\nCaller: I need to go now.",
+        "result": {"schemaVersion": "2.0.0", "outcome": "enquiry", "completeness": "partial",
+                   "messageConfirmed": False, "callbackNumberConfirmed": False,
+                   "evidence": [quote("consent", "caller", "Yes, please.")],
+                   "uncertainties": ["Intake ended before a message, name or callback number was supplied."]},
+    },
+    "caller_refusal": {
+        "transcript": "Assistant: Would you like to leave a message?\nCaller: No thanks, I don't want to leave a message.",
+        "result": no_message("declined", [
+            quote("consent", "caller", "No thanks, I don't want to leave a message."),
+            quote("outcome", "caller", "No thanks, I don't want to leave a message."),
+        ]),
+    },
+    "caller_withdrawal_overrides_acceptance": {
+        "transcript": "Assistant: Would you like to leave a message?\nCaller: Yes, please.\nCaller: Please call about my chair.\nCaller: Please don't pass that on.",
+        "result": no_message("declined", [
+            quote("consent", "caller", "Please don't pass that on."),
+            quote("outcome", "caller", "Please don't pass that on."),
+        ]),
+    },
+    "assistant_offer_without_caller_acceptance": {
+        "transcript": "Assistant: Would you like to leave a message for the team?",
+        "result": no_message("no_message"),
+    },
+    "name_alone_does_not_establish_consent": {
+        "transcript": "Assistant: Would you like to leave a message for the team?\nCaller: I'm Jamie.",
+        "result": no_message("no_message"),
+    },
+}
+
+
 # These are manual extraction expectations, not a transcript-to-result model.
 MESSAGE_CONFIRMATION_EXPECTATIONS = {}
 for case, summary in (
@@ -104,28 +165,51 @@ for case, summary in (
     result["message"] = f"Please ask the team to {summary}."
     message_evidence = [
         quote("message", "caller", "Please ask the team to my idea."),
-        quote("message", "assistant", "You would like the team to discuss your idea. Is that correct?"),
-        quote("message", "caller", "Yes, that is correct."),
+        quote("messageReadback", "assistant", "You would like the team to discuss your idea. Is that correct?"),
+        quote("messageConfirmation", "caller", "Yes, that is correct."),
     ]
     if case == "later_message_correction_reconfirmed":
         message_evidence += [
             quote("message", "caller", "Actually, I want the team to license my idea."),
-            quote("message", "assistant", "You would like the team to license your idea. Is that correct?"),
-            quote("message", "caller", "Yes, exactly."),
+            quote("messageReadback", "assistant", "You would like the team to license your idea. Is that correct?"),
+            quote("messageConfirmation", "caller", "Yes, exactly."),
         ]
     result["evidence"][2:5] = message_evidence
     MESSAGE_CONFIRMATION_EXPECTATIONS[case] = {"result": result}
 
 unresolved = deepcopy(COMPLETE)
 unresolved.pop("message")
-unresolved.update(completeness="partial",
+unresolved.update(completeness="partial", messageConfirmed=False,
                   uncertainties=["Message meaning is unclear and no message summary was confirmed."])
 unresolved["evidence"] = deepcopy(COMPLETE["evidence"][:2] + COMPLETE["evidence"][5:]) + [
     quote("message", "caller", "Please ask the team to my idea."),
-    quote("message", "assistant", "You would like the team to discuss your idea. Is that correct?"),
-    quote("message", "caller", "I need to go now."),
+    quote("messageReadback", "assistant", "You would like the team to discuss your idea. Is that correct?"),
+    quote("messageConfirmation", "caller", "I need to go now."),
 ]
 MESSAGE_CONFIRMATION_EXPECTATIONS["ambiguous_message_ends_before_confirmation"] = {"result": unresolved}
+
+clear_unconfirmed = deepcopy(COMPLETE)
+clear_unconfirmed.update(completeness="partial", messageConfirmed=False,
+                         uncertainties=["The caller did not confirm the message summary."])
+clear_unconfirmed["evidence"] = deepcopy(COMPLETE["evidence"][:3] + COMPLETE["evidence"][5:]
+                                          + COMPLETE["evidence"][3:4]) + [
+    quote("messageConfirmation", "caller", "I need to go now."),
+]
+MESSAGE_CONFIRMATION_EXPECTATIONS["clear_message_not_confirmed"] = {"result": clear_unconfirmed}
+
+corrected_message = deepcopy(COMPLETE)
+corrected_message.update(message="Alex would like a call about repairing Alex's table.",
+                         completeness="partial", messageConfirmed=False,
+                         uncertainties=["The corrected message was not read back and confirmed."])
+corrected_message["evidence"] += [quote("message", "caller", "Actually, it is my table that needs repairing.")]
+MESSAGE_CONFIRMATION_EXPECTATIONS["later_message_correction_unconfirmed"] = {"result": corrected_message}
+
+no_additions = deepcopy(clear_unconfirmed)
+no_additions["evidence"] = deepcopy(COMPLETE["evidence"][:3] + COMPLETE["evidence"][5:]) + [
+    quote("message", "assistant", "Is there anything else you would like to add?"),
+    quote("message", "caller", "No, nothing else."),
+]
+MESSAGE_CONFIRMATION_EXPECTATIONS["no_additions_is_not_confirmation"] = {"result": no_additions}
 for expectation in MESSAGE_CONFIRMATION_EXPECTATIONS.values():
     expectation["transcript"] = "\n".join(
         f"{item['speaker'].title()}: {item['quote']}" for item in expectation["result"]["evidence"]
@@ -150,8 +234,8 @@ for case, name, request, summary, message in (
     result["message"] = message
     result["evidence"][2:5] = [
         quote("message", "caller", request),
-        quote("message", "assistant", summary),
-        quote("message", "caller", "Yes, that is correct."),
+        quote("messageReadback", "assistant", summary),
+        quote("messageConfirmation", "caller", "Yes, that is correct."),
     ]
     if name is None:
         result.pop("callerName")
@@ -231,7 +315,7 @@ class OutputTests(unittest.TestCase):
 
     def test_definition_adapts_schema_without_changing_contract_binding_or_state(self):
         output = render_output(self.root, SLUG)
-        source_path = self.root / "result/enquiry-result.v1.schema.json"
+        source_path = self.root / "result/enquiry-result.v2.schema.json"
         original = source_path.read_bytes()
         source = json.loads(original)
         self.assertNotIn("$schema", output["schema"])
@@ -241,10 +325,10 @@ class OutputTests(unittest.TestCase):
         self.assertIn("allOf", source)
         self.assertNotIn("allOf", output["schema"])
         self.assertEqual(set(output["schema"]["required"]), set(source["properties"]))
-        self.assertEqual(output["schema"]["properties"]["schemaVersion"]["enum"], ["1.0.0"])
+        self.assertEqual(output["schema"]["properties"]["schemaVersion"]["enum"], ["2.0.0"])
         self.assertNotIn("minLength", output["schema"]["properties"]["callerName"])
         self.assertEqual(source_path.read_bytes(), original)
-        self.assertEqual(output["name"], "messenger_recipe_demo-enquiry-v1")
+        self.assertEqual(output["name"], "messenger_recipe_demo-enquiry-v2")
         self.assertEqual(output["conditions"], [{"type": "minMessages", "count": 0}])
         self.assertEqual(output["model"]["model"], "gpt-4.1-mini")
         self.assertEqual(output["model"]["provider"], "openai")
@@ -351,7 +435,7 @@ class OutputTests(unittest.TestCase):
                     render_output(self.root, SLUG)
 
     def test_silent_schema_contract_change_is_rejected(self):
-        path = self.root / "result/enquiry-result.v1.schema.json"
+        path = self.root / "result/enquiry-result.v2.schema.json"
         schema = json.loads(path.read_text())
         schema.pop("allOf")
         path.write_text(json.dumps(schema) + "\n")
@@ -359,7 +443,7 @@ class OutputTests(unittest.TestCase):
             render_output(self.root, SLUG)
 
     def test_portable_number_pattern_matches_the_existing_local_number_rule(self):
-        schema = json.loads((self.root / "result/enquiry-result.v1.schema.json").read_text())
+        schema = json.loads((self.root / "result/enquiry-result.v2.schema.json").read_text())
         pattern = schema["properties"]["callbackNumber"]["pattern"]
         for value in ("2025550123", "+12025550123", "123"):
             with self.subTest(value=value):
@@ -378,7 +462,7 @@ class OutputTests(unittest.TestCase):
         self.assertFalse({"callerName", "message", "callbackNumber"}.intersection(
             SYNTHETIC_EXPECTATIONS["withdrawn"]["result"]))
 
-    def test_confirmation_expectations_preserve_v1_shape_without_model_claim(self):
+    def test_confirmation_expectations_preserve_v2_shape_without_model_claim(self):
         for name, expectation in {**MESSAGE_CONFIRMATION_EXPECTATIONS,
                                   **MESSAGE_PERSPECTIVE_EXPECTATIONS,
                                   **NUMBER_READBACK_EXPECTATIONS}.items():
@@ -395,16 +479,91 @@ class OutputTests(unittest.TestCase):
         with self.assertRaises(RecipeError):
             normalize_native_result(contradictory)
 
+    def test_consent_expectations_quote_callers_without_model_claim(self):
+        for name, expectation in CONSENT_EXPECTATIONS.items():
+            with self.subTest(name=name):
+                expected = expectation["result"]
+                wire = deepcopy(expected)
+                for field in ("callerName", "message", "callbackNumber"):
+                    wire.setdefault(field, "")
+                self.assertEqual(normalize_native_result(wire), expected)
+                consent = [item for item in expected["evidence"] if item["field"] == "consent"]
+                if expected["outcome"] == "enquiry":
+                    self.assertTrue(consent)
+                caller_turns = [turn.removeprefix("Caller: ")
+                                for turn in expectation["transcript"].splitlines() if turn.startswith("Caller: ")]
+                for item in consent:
+                    self.assertEqual(item["speaker"], "caller")
+                    self.assertTrue(any(item["quote"] in turn for turn in caller_turns))
+        self.assertEqual(CONSENT_EXPECTATIONS["assistant_offer_without_caller_acceptance"]["result"]["evidence"], [])
+        withdrawn = CONSENT_EXPECTATIONS["caller_withdrawal_overrides_acceptance"]["result"]
+        self.assertFalse({"callerName", "message", "callbackNumber"}.intersection(withdrawn))
+
     def test_complete_and_confirmed_shape_requirements_are_enforced(self):
         for field in ("callerName", "message", "callbackNumber"):
             result = deepcopy(COMPLETE)
             result.pop(field)
             with self.subTest(field=field), self.assertRaises(RecipeError):
                 validate_result_shape(result)
-        result = deepcopy(COMPLETE)
-        result["callbackNumberConfirmed"] = False
+        for field in ("messageConfirmed", "callbackNumberConfirmed"):
+            result = dict(COMPLETE, **{field: False})
+            with self.subTest(field=field), self.assertRaises(RecipeError):
+                validate_result_shape(result)
+
+    def test_message_confirmation_is_required_boolean_and_needs_a_message(self):
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaises(RecipeError):
+                normalize_native_result(dict(PARTIAL, messageConfirmed=value))
+        result = deepcopy(PARTIAL)
+        del result["messageConfirmed"]
+        with self.assertRaises(RecipeError):
+            normalize_native_result(result)
+        for value in (None, ""):
+            result = dict(PARTIAL, message=value)
+            with self.subTest(message=value), self.assertRaises(RecipeError):
+                normalize_native_result(result)
+        result = deepcopy(PARTIAL)
+        del result["message"]
         with self.assertRaises(RecipeError):
             validate_result_shape(result)
+
+    def test_message_confirmation_is_independent_of_callback_confirmation(self):
+        self.assertTrue(PARTIAL["messageConfirmed"])
+        self.assertFalse(PARTIAL["callbackNumberConfirmed"])
+        for name in ("clear_message_not_confirmed", "later_message_correction_unconfirmed",
+                     "no_additions_is_not_confirmation", "ambiguous_message_ends_before_confirmation"):
+            result = MESSAGE_CONFIRMATION_EXPECTATIONS[name]["result"]
+            with self.subTest(name=name):
+                self.assertFalse(result["messageConfirmed"])
+                self.assertTrue(result["callbackNumberConfirmed"])
+                self.assertEqual(result["completeness"], "partial")
+                validate_result_shape(result)
+        for name in ("confirmed_summary_after_transcript_omission", "later_message_correction_reconfirmed"):
+            result = MESSAGE_CONFIRMATION_EXPECTATIONS[name]["result"]
+            with self.subTest(name=name):
+                self.assertTrue(result["messageConfirmed"])
+                self.assertEqual(result["completeness"], "complete")
+
+    def test_historical_v1_results_remain_v1_without_inferred_message_confirmation(self):
+        historical = deepcopy(COMPLETE)
+        historical["schemaVersion"] = "1.0.0"
+        del historical["messageConfirmed"]
+        for item in historical["evidence"]:
+            if item["field"] in ("messageReadback", "messageConfirmation"):
+                item["field"] = "message"
+        original = deepcopy(historical)
+        self.assertEqual(normalize_native_result(historical), original)
+        call = {"artifact": {"structuredOutputs": {"output-fixture": {"result": historical}}}}
+        reading = read_enquiry_result(call, "output-fixture")
+        self.assertEqual(reading, {"status": "valid_shape_semantics_unproved", "result": original})
+        self.assertNotIn("messageConfirmed", reading["result"])
+        self.assertEqual(historical, original)
+        for changes in ({"messageConfirmed": True}, {"schemaVersion": "2.0.0"}, {"schemaVersion": "3.0.0"}):
+            with self.subTest(changes=changes), self.assertRaises(RecipeError):
+                normalize_native_result(dict(historical, **changes))
+        historical["evidence"][3]["field"] = "messageReadback"
+        with self.assertRaises(RecipeError):
+            validate_result_shape(historical)
 
     def test_non_enquiry_results_suppress_captured_fields(self):
         for outcome in ("declined", "unsupported", "no_message"):
@@ -413,6 +572,9 @@ class OutputTests(unittest.TestCase):
                 result[field] = COMPLETE[field]
                 with self.subTest(outcome=outcome, field=field), self.assertRaises(RecipeError):
                     validate_result_shape(result)
+            for field in ("messageConfirmed", "callbackNumberConfirmed"):
+                with self.subTest(outcome=outcome, field=field), self.assertRaises(RecipeError):
+                    validate_result_shape(dict(no_message(outcome), **{field: True}))
 
     def test_unknown_metadata_null_nested_fields_and_invalid_numbers_are_rejected(self):
         mutations = [lambda value: value.update(callId="invented"),
@@ -455,7 +617,7 @@ class OutputTests(unittest.TestCase):
             value = no_message(outcome)
             value.update(callerName="Alex", message="", callbackNumber="")
             invalid.append(value)
-        for field in ("schemaVersion", "outcome", "completeness", "callbackNumberConfirmed", "evidence", "uncertainties"):
+        for field in ("schemaVersion", "outcome", "completeness", "messageConfirmed", "callbackNumberConfirmed", "evidence", "uncertainties"):
             value = deepcopy(COMPLETE)
             del value[field]
             invalid.append(value)

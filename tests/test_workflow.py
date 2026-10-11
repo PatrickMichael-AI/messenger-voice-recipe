@@ -7,8 +7,9 @@ import shutil
 import tempfile
 import unittest
 
-from messenger_recipe.deployment import DeploymentError
+from messenger_recipe.deployment import Deployment, DeploymentError
 from messenger_recipe.recipe import RecipeError, record_voice_selection, stage_candidate
+from messenger_recipe.state import InstanceState
 from messenger_recipe.workflow import deploy, deployment_preview, promote, require_promotion, verify_deployment
 
 
@@ -273,6 +274,41 @@ class WorkflowTests(unittest.TestCase):
             deploy(self.root, SLUG, self.provider, update_output=True)
         self.assertEqual([c[:2] for c in self.provider.calls], [("get", "output")])
         self.assertEqual((state / "output-accepted.json").read_bytes(), before)
+
+    def test_contract_upgrade_from_accepted_v1_output_requires_explicit_update_and_retains_ids(self):
+        self.approve()
+        preview = deployment_preview(self.root, SLUG)
+        legacy = deepcopy(preview["outputDefinition"])
+        legacy.update(name=f"{SLUG}-enquiry-v1", description="Synthetic historical v1 output")
+        legacy["model"]["messages"][0]["content"] = "Synthetic historical v1 extraction using {{transcript}} and {{structuredOutput.schema}}."
+        schema = legacy["schema"]
+        schema["properties"]["schemaVersion"]["enum"] = ["1.0.0"]
+        del schema["properties"]["messageConfirmed"]
+        schema["required"].remove("messageConfirmed")
+        schema["properties"]["evidence"]["items"]["properties"]["field"]["enum"] = [
+            field for field in schema["properties"]["evidence"]["items"]["properties"]["field"]["enum"]
+            if field not in ("messageReadback", "messageConfirmation")]
+        state = InstanceState(self.root, SLUG)
+        deployment = Deployment(self.provider, state)
+        output_id = deployment.ensure("output", legacy)["id"]
+        assistant = deepcopy(preview["assistantCandidate"])
+        assistant["artifactPlan"]["structuredOutputIds"] = [output_id]
+        assistant_id = deployment.ensure("assistant", assistant)["id"]
+        previous = state.read_text("output-accepted.json")
+        self.provider.calls.clear()
+
+        with self.assertRaisesRegex(DeploymentError, "binding conflicts"):
+            deploy(self.root, SLUG, self.provider)
+        self.assertEqual(self.provider.calls, [])
+        updated = deploy(self.root, SLUG, self.provider, update_output=True)
+        self.assertEqual((updated["outputId"], updated["assistantId"]), (output_id, assistant_id))
+        self.assertEqual([call[:2] for call in self.provider.calls], [
+            ("get", "output"), ("patch", "output"), ("get", "output"), ("get", "assistant")])
+        self.assertEqual(self.provider.resources[output_id]["schema"]["properties"]["schemaVersion"]["enum"], ["2.0.0"])
+        self.assertIn("messageConfirmed", self.provider.resources[output_id]["schema"]["required"])
+        archives = list(state.path("output-accepted.json").parent.glob("output-accepted.*.json"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_text(), previous)
 
     def test_output_update_lost_response_recovers_by_get_without_repatch_or_create(self):
         self.approve()

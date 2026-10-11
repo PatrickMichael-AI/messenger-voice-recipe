@@ -84,8 +84,8 @@ def load_instance(root: Path, slug: str) -> dict:
     result = instance.get("result")
     if not isinstance(result, dict) or set(result) != {"logicalName", "version", "schemaRef"}:
         raise RecipeError("Result requires logicalName, version and package-owned schemaRef.")
-    if result["logicalName"] != "messenger-enquiry" or result["version"] != "1.0.0":
-        raise RecipeError("Only the existing Messenger enquiry result v1.0.0 is supported.")
+    if result["logicalName"] != "messenger-enquiry" or result["version"] != "2.0.0":
+        raise RecipeError("New deployments require Messenger enquiry result v2.0.0.")
     read_json(package_path(root, result["schemaRef"]))
     privacy = instance.get("privacy")
     if (not isinstance(privacy, dict)

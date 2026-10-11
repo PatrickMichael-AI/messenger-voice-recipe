@@ -43,6 +43,13 @@ class RecipeTests(unittest.TestCase):
             render_candidate(self.root, SLUG)
         self.assertFalse((self.root / ".local").exists())
 
+    def test_new_instances_require_v2_even_though_historical_results_are_readable(self):
+        relative = f"instances/{SLUG}/recipe.json"
+        self.update(relative, lambda value: value["result"].update(
+            version="1.0.0", schemaRef="result/enquiry-result.v1.schema.json"))
+        with self.assertRaisesRegex(RecipeError, "v2.0.0"):
+            load_instance(self.root, SLUG)
+
     def test_exact_twenty_one_section_render_and_pending_runtime_candidate(self):
         self.approve()
         candidate = render_candidate(self.root, SLUG)

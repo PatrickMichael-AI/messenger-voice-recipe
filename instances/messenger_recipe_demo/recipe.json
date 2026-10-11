@@ -23,8 +23,8 @@
   },
   "result": {
     "logicalName": "messenger-enquiry",
-    "version": "1.0.0",
-    "schemaRef": "result/enquiry-result.v1.schema.json"
+    "version": "2.0.0",
+    "schemaRef": "result/enquiry-result.v2.schema.json"
   },
   "privacy": {
     "recordingEnabled": true,

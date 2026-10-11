@@ -88,8 +88,8 @@ class CallFetchTests(unittest.TestCase):
 
     def test_inspection_reports_valid_shape_without_semantic_claim_or_private_content(self):
         response = copy.deepcopy(self.response)
-        result = {"schemaVersion": "1.0.0", "outcome": "no_message", "completeness": "not_applicable",
-                  "callbackNumberConfirmed": False, "evidence": [], "uncertainties": []}
+        result = {"schemaVersion": "2.0.0", "outcome": "no_message", "completeness": "not_applicable",
+                  "messageConfirmed": False, "callbackNumberConfirmed": False, "evidence": [], "uncertainties": []}
         response["artifact"]["structuredOutputs"]["output-fixture"] = {"result": result, "version": 7}
         response["transcript"] = "Private synthetic transcript"
         path = self.save(response, attempt=2)
@@ -103,8 +103,8 @@ class CallFetchTests(unittest.TestCase):
 
     def test_inspection_validates_provider_placeholders_without_rewriting_call(self):
         response = copy.deepcopy(self.response)
-        result = {"schemaVersion": "1.0.0", "outcome": "declined", "completeness": "not_applicable",
-                  "callbackNumberConfirmed": False, "callerName": "", "message": "", "callbackNumber": "",
+        result = {"schemaVersion": "2.0.0", "outcome": "declined", "completeness": "not_applicable",
+                  "messageConfirmed": False, "callbackNumberConfirmed": False, "callerName": "", "message": "", "callbackNumber": "",
                   "evidence": [], "uncertainties": []}
         response["artifact"]["structuredOutputs"]["output-fixture"] = {"result": result}
         path = self.save(response)

@@ -1,4 +1,4 @@
-"""Native extraction source rendering and enquiry-v1 shape checks.
+"""Native extraction source rendering and versioned enquiry shape checks.
 
 The definition follows Vapi's create-output API (checked 2026-10-06):
 https://docs.vapi.ai/api-reference/structured-outputs/structured-output-controller-create
@@ -19,7 +19,7 @@ from .recipe import load_instance
 from .state import RecipeError, package_path, read_json
 
 
-SCHEMA_DIGEST = "f304b725ddd73019f564a84fea7cb2c422b53073df8f658ed4a32e6e73dddd19"
+SCHEMA_DIGEST = "0eee4e0ce79fdde6ee0fd3be8a912450f34ad4c86708b1787f44c9c31bb0ee58"
 DEFINITION_PATH = "config/structured-output.json"
 
 
@@ -29,7 +29,7 @@ def render_output(root: Path, slug: str) -> dict:
     The result contract stays unchanged in its sole instance-owned source.
     Its provider representation uses the common Vapi/OpenAI schema subset.
     Cross-field conditions and non-empty checks remain in local validation.
-    Changing the v1 contract requires a separately reviewed version/migration.
+    Changing this reviewed v2 contract requires an explicit version review.
     """
     instance = load_instance(root, slug)
     definition = read_json(package_path(root, DEFINITION_PATH))
@@ -74,7 +74,7 @@ def render_output(root: Path, slug: str) -> dict:
         raise RecipeError("Extraction contains an unsupported Liquid expression.")
     schema = read_json(package_path(root, instance["result"]["schemaRef"]))
     if digest(schema) != SCHEMA_DIGEST:
-        raise RecipeError("Enquiry v1.0.0 schema differs from the agreed contract; review a version change.")
+        raise RecipeError("Enquiry v2.0.0 schema differs from the agreed contract; review a version change.")
     result = deepcopy(definition)
     result["name"] = full_name
     result["schema"] = _vapi_schema(schema)
@@ -112,7 +112,8 @@ def _vapi_schema(schema: dict) -> dict:
 def normalize_native_result(result: dict) -> dict:
     """Return a validated canonical copy; leave raw provider evidence untouched.
 
-    Historical canonical results without empty placeholders remain readable.
+    Historical v1 results remain v1; message confirmation is never inferred.
+    Canonical results without empty placeholders remain readable.
     Only exact empty captured strings become omissions; nulls, missing required
     fields, unknown fields and contradictory outcomes still fail validation.
     """
@@ -168,24 +169,33 @@ def read_enquiry_result(call: dict, output_id: str) -> dict:
 
 
 def validate_result_shape(result: dict) -> None:
-    """Check the fixed enquiry-v1 schema shape; never claim semantic validity.
+    """Check v2 or historical v1 shape; never claim semantic validity.
 
-This small contract-specific check needs no JSON Schema runtime dependency.
-It enforces the existing v1 fields/conditions, including nested evidence. It
-does not verify quotes, consent, chronology, latest values or extraction success.
-"""
+    This contract-specific check needs no JSON Schema runtime dependency.
+    Version dispatch preserves saved v1 evidence without upgrading it or
+    inferring message confirmation. New extraction uses v2 only. Neither
+    shape proves quotes, consent, chronology, latest values or extraction success.
+    """
+    if not isinstance(result, dict):
+        raise RecipeError("Result must be an object.")
+    version = result.get("schemaVersion")
+    if version not in ("1.0.0", "2.0.0"):
+        raise RecipeError("Result schemaVersion must be 1.0.0 or 2.0.0.")
     required = {"schemaVersion", "outcome", "completeness", "callbackNumberConfirmed", "evidence", "uncertainties"}
+    confirmations = {"callbackNumberConfirmed"}
+    if version == "2.0.0":
+        required.add("messageConfirmed")
+        confirmations.add("messageConfirmed")
     captured = {"callerName", "message", "callbackNumber"}
-    if not isinstance(result, dict) or not required.issubset(result) or set(result) - required - captured:
+    if not required.issubset(result) or set(result) - required - captured:
         raise RecipeError("Result has missing required or unknown fields.")
-    if result["schemaVersion"] != "1.0.0":
-        raise RecipeError("Result schemaVersion must be 1.0.0.")
     if result["outcome"] not in ("enquiry", "declined", "unsupported", "no_message"):
         raise RecipeError("Result outcome is invalid.")
     if result["completeness"] not in ("complete", "partial", "not_applicable"):
         raise RecipeError("Result completeness is invalid.")
-    if type(result["callbackNumberConfirmed"]) is not bool:
-        raise RecipeError("Result callbackNumberConfirmed must be a boolean.")
+    for field in confirmations:
+        if type(result[field]) is not bool:
+            raise RecipeError(f"Result {field} must be a boolean.")
     for field in captured.intersection(result):
         if not isinstance(result[field], str) or len(result[field]) < 1:
             raise RecipeError(f"Result {field} must be a non-empty string when supplied.")
@@ -194,16 +204,21 @@ does not verify quotes, consent, chronology, latest values or extraction success
     if result["outcome"] == "enquiry":
         if result["completeness"] not in ("complete", "partial"):
             raise RecipeError("Enquiry completeness must be complete or partial.")
-    elif (result["completeness"] != "not_applicable" or result["callbackNumberConfirmed"]
+    elif (result["completeness"] != "not_applicable" or any(result[field] for field in confirmations)
           or captured.intersection(result)):
         raise RecipeError("Non-enquiry results omit captured fields and use not_applicable/false.")
-    if result["completeness"] == "complete" and (not captured.issubset(result) or not result["callbackNumberConfirmed"]):
-        raise RecipeError("Complete results require name, message, number and confirmation.")
+    if result["completeness"] == "complete" and (not captured.issubset(result)
+                                                or not all(result[field] for field in confirmations)):
+        raise RecipeError("Complete results require name, message, number and every confirmation.")
+    if version == "2.0.0" and result["messageConfirmed"] and "message" not in result:
+        raise RecipeError("Confirmed result requires a message.")
     if result["callbackNumberConfirmed"] and "callbackNumber" not in result:
         raise RecipeError("Confirmed result requires a callback number.")
     if not isinstance(result["evidence"], list) or not isinstance(result["uncertainties"], list):
         raise RecipeError("Evidence and uncertainties must be arrays.")
     fields = ("consent", "callerName", "message", "callbackNumber", "callbackReadback", "callbackConfirmation", "outcome")
+    if version == "2.0.0":
+        fields += ("messageReadback", "messageConfirmation")
     for item in result["evidence"]:
         if (not isinstance(item, dict) or set(item) != {"field", "speaker", "quote"}
                 or item["field"] not in fields or item["speaker"] not in ("caller", "assistant")
